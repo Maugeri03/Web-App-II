@@ -1,0 +1,405 @@
+openapi: 3.1.0
+info:
+  title: Ticketing API
+  version: 0.1.0
+  description: >-
+    API responsible for issuing and revoking tickets, managing entry
+    credentials, recording scan attempts, and registering admissions.
+    Ticketing issues one ticket per order item after receiving OrderPaid.
+    Error responses use RFC 9457 Problem Details.
+servers: [{ url: "http://localhost:8084", description: Axum }]
+security: [{ bearerAuth: [] }]
+tags:
+  - { name: Tickets, description: Ticket listing and detail retrieval. }
+  - { name: Scans, description: Entry credential checks and scan attempt details. }
+  - { name: Admissions, description: Retrieval of recorded admissions for tickets. }
+
+paths:
+  /tickets:
+    get:
+      tags: [Tickets]
+      operationId: listOrderTickets
+      summary: List tickets for an order
+      description: >-
+        Only the customer who owns the order can retrieve its tickets.
+        Returns the complete batch of up to 10 tickets, ordered by orderItemId.
+        A PAID order awaiting ticket issuance returns 200 with issuanceState
+        set to PENDING and an empty items list.
+        If order ownership is not yet known, Ticketing calls
+        GET /internal/orders/{orderId}/ticket-context with a timeout,
+        using its service JWT and the customerId from the verified customer JWT.
+        Returns 404 if the order does not exist or belongs to another customer.
+        While issuance is PENDING, the client must use a polling interval
+        of at least 2 seconds.
+      parameters:
+        - { $ref: "#/components/parameters/ApiVersion" }
+        - { $ref: "#/components/parameters/OrderId" }
+      responses:
+        "200":
+          description: The current issuance state and the order's tickets.
+          headers:
+            Cache-Control: { description: Ticket responses use no-store.,
+                             schema: { type: string } }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/OrderTickets" }
+              example: { orderId: ord_1, issuanceState: PENDING, items: [] }
+        "400": { $ref: "#/components/responses/MalformedRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "422": { $ref: "#/components/responses/ValidationFailed" }
+        default: { $ref: "#/components/responses/UnexpectedError" }
+
+  /tickets/{ticketId}:
+    get:
+      tags: [Tickets]
+      operationId: getTicket
+      summary: Get ticket details
+      description: >-
+        Only the customer who owns the ticket can retrieve its details
+        and entry token. The client can display the entry token as a QR code.
+        Returns 404 if the ticket does not exist or belongs to another customer.
+      parameters:
+        - { $ref: "#/components/parameters/ApiVersion" }
+        - { $ref: "#/components/parameters/TicketId" }
+      responses:
+        "200":
+          description: Ticket details and entry token.
+          headers:
+            Cache-Control: { description: Ticket responses use no-store.,
+                             schema: { type: string } }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Ticket" }
+              example: { ticketId: tkt_1, orderId: ord_1, orderItemId: item_1,
+                         customerId: usr_anna, sessionId: ses_1, seatId: seat_a1,
+                         holderName: null, state: VALID,
+                         issuedAt: "2027-07-10T20:07:05+02:00",
+                         entryToken: example_entry_token_tkt_1 }
+        "400": { $ref: "#/components/responses/MalformedRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        default: { $ref: "#/components/responses/UnexpectedError" }
+
+  /tickets/{ticketId}/scans:
+    post:
+      tags: [Scans]
+      operationId: scanTicket
+      summary: Validate a ticket and record a scan
+      description: >-
+        Only a gate operator authorised for the selected session can record a scan.
+        Ticketing verifies the entry token and ticket state and checks
+        that the ticket belongs to the session selected by the gate operator.
+        It identifies the operator from the JWT and records the server time.
+        An accepted scan records one admission and marks the ticket as USED.
+        Ticketing derives operatorId from the verified JWT
+        and sets scannedAt using the server clock.
+        Ticketing returns 201 whenever it records a new scan attempt.
+        The outcome indicates whether entry was granted or denied.
+        Retrying the same request with the same idempotency key returns
+        the original result. A new scan of a USED ticket returns ALREADY_USED
+        when the credential and session checks pass.
+      parameters:
+        - { $ref: "#/components/parameters/ApiVersion" }
+        - { $ref: "#/components/parameters/TicketId" }
+        - { $ref: "#/components/parameters/IdempotencyKey" }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ScanCreateRequest" }
+            example: { sessionId: ses_1, entryToken: example_entry_token_tkt_1 }
+      responses:
+        "201":
+          description: The scan attempt has been recorded. The outcome indicates whether entry was granted.
+          headers:
+            Location: { description: Relative URI used to retrieve the recorded scan,
+                        required: true, schema: { type: string } }
+            Cache-Control: { description: Scan responses use no-store.,
+                             schema: { type: string } }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Scan" }
+              example: { scanId: scn_1, ticketId: tkt_1, sessionId: ses_1,
+                         operatorId: usr_gate_1, scannedAt: "2027-07-10T21:15:00+02:00",
+                         outcome: ADMITTED, admissionId: adm_1 }
+        "400": { $ref: "#/components/responses/MalformedRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "415": { $ref: "#/components/responses/UnsupportedMediaType" }
+        "422": { $ref: "#/components/responses/ValidationFailed" }
+        default: { $ref: "#/components/responses/UnexpectedError" }
+
+  /scans/{scanId}:
+    get:
+      tags: [Scans]
+      operationId: getScan
+      summary: Get a recorded scan result
+      description: >-
+        The gate operator who performed the scan can retrieve it while
+        authorised for the session. Administrators can also retrieve it.
+        Returns the recorded scan outcome. Returns 404 if the scan does
+        not exist or is outside the operator's authorised scope.
+      parameters:
+        - { $ref: "#/components/parameters/ApiVersion" }
+        - { $ref: "#/components/parameters/ScanId" }
+      responses:
+        "200":
+          description: The recorded scan attempt and its outcome.
+          headers:
+            Cache-Control: { description: Scan responses use no-store.,
+                             schema: { type: string } }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Scan" }
+              example: { scanId: scn_1, ticketId: tkt_1, sessionId: ses_1,
+                         operatorId: usr_gate_1, scannedAt: "2027-07-10T21:15:00+02:00",
+                         outcome: ADMITTED, admissionId: adm_1 }
+        "400": { $ref: "#/components/responses/MalformedRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        default: { $ref: "#/components/responses/UnexpectedError" }
+
+  /tickets/{ticketId}/admission:
+    get:
+      tags: [Admissions]
+      operationId: getAdmission
+      summary: Get the recorded admission for a ticket
+      description: >-
+        A gate operator authorised for the ticket's session or an administrator
+        can retrieve the recorded admission. Each ticket has at most one admission.
+        Returns 404 if no admission is recorded or if the ticket's session
+        is outside the operator's authorised scope.
+      parameters:
+        - { $ref: "#/components/parameters/ApiVersion" }
+        - { $ref: "#/components/parameters/TicketId" }
+      responses:
+        "200":
+          description: The recorded admission for the ticket.
+          headers:
+            Cache-Control: { description: Admission responses use no-store.,
+                             schema: { type: string } }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Admission" }
+              example: { admissionId: adm_1, ticketId: tkt_1, sessionId: ses_1,
+                         operatorId: usr_gate_1, admittedAt: "2027-07-10T21:15:00+02:00" }
+        "400": { $ref: "#/components/responses/MalformedRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        default: { $ref: "#/components/responses/UnexpectedError" }
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: JWT access token issued by Keycloak.
+
+  parameters:
+    ApiVersion:
+      name: X-API-Version
+      in: header
+      required: false
+      description: >-
+        API version requested by the client. Defaults to 1.0 when omitted.
+        Unsupported versions return 400.
+      schema: { type: string, enum: ["1.0"], default: "1.0" }
+
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      description: >-
+        Generate a UUID for each new operation and reuse it when retrying.
+        Keys are scoped to the caller and operation and retained for 24 hours.
+        The same key and request data return the stored response once completed.
+        Reusing a key with different data returns 422.
+        A matching request still in progress returns 409.
+        A missing or invalid key returns 400.
+        The service saves the change, the idempotency key, and the response
+        in the same transaction.
+      schema: { type: string, format: uuid }
+
+    TicketId:
+      name: ticketId
+      in: path
+      required: true
+      description: Identifier of the ticket.
+      schema: { type: string }
+
+    ScanId:
+      name: scanId
+      in: path
+      required: true
+      description: Identifier of the scan.
+      schema: { type: string }
+
+    OrderId:
+      name: orderId
+      in: query
+      required: true
+      description: Identifier of the order.
+      schema: { type: string, minLength: 1 }
+
+  schemas:
+    FieldError:
+      type: object
+      description: A validation error associated with a request field.
+      properties:
+        field: { type: string }
+        code: { type: string }
+        detail: { type: string }
+      required: [field, code, detail]
+
+    Problem:
+      type: object
+      description: RFC 9457 Problem Details with a stable code and optional field errors.
+      properties:
+        type: { type: string, format: uri-reference }
+        title: { type: string }
+        status: { type: integer, minimum: 400, maximum: 599 }
+        detail: { type: string }
+        instance: { type: string, format: uri-reference }
+        code: { type: string }
+        errors: { type: array, items: { $ref: "#/components/schemas/FieldError" } }
+      required: [type, title, status, code, instance]
+
+    Ticket:
+      type: object
+      description: >-
+        A ticket for one seat in one session, linked to a single order item.
+        The holderName field is null when no name is assigned to the ticket.
+        Only the ticket owner receives the entry token used for the QR code.
+        The service keeps the token out of broker messages, notifications, and logs.
+      properties:
+        ticketId: { type: string, minLength: 1 }
+        orderId: { type: string, minLength: 1 }
+        orderItemId: { type: string, minLength: 1 }
+        customerId: { type: string, minLength: 1 }
+        sessionId: { type: string, minLength: 1 }
+        seatId: { type: string, minLength: 1 }
+        holderName: { type: [string, "null"] }
+        state: { type: string, enum: [VALID, USED, REVOKED] }
+        issuedAt: { type: string, format: date-time }
+        entryToken: { type: string, minLength: 1 }
+      required: [ticketId, orderId, orderItemId, customerId, sessionId, seatId,
+                 holderName, state, issuedAt, entryToken]
+
+    OrderTickets:
+      type: object
+      description: >-
+        Reports whether ticket issuance is complete for the order.
+        While issuance is PENDING, items is empty.
+        Once issuance is complete, the response includes the full list.
+      properties:
+        orderId: { type: string, minLength: 1 }
+        issuanceState: { type: string, enum: [PENDING, ISSUED, REVOKED] }
+        items:
+          type: array
+          maxItems: 10
+          items: { $ref: "#/components/schemas/Ticket" }
+      required: [orderId, issuanceState, items]
+
+    ScanCreateRequest:
+      type: object
+      description: >-
+        Session selected by the gate operator and entry token read from the QR code.
+        Ticketing derives the operator identifier from the verified JWT.
+      properties:
+        sessionId: { type: string, minLength: 1 }
+        entryToken: { type: string, minLength: 1 }
+      required: [sessionId, entryToken]
+      additionalProperties: false
+
+    Admission:
+      type: object
+      description: >-
+        Entry recorded when a ticket scan is accepted.
+        Each ticket can have at most one admission.
+        Ticketing records the admission and marks the ticket as USED
+        in the same transaction.
+      properties:
+        admissionId: { type: string, minLength: 1 }
+        ticketId: { type: string, minLength: 1 }
+        sessionId: { type: string, minLength: 1 }
+        operatorId: { type: string, minLength: 1 }
+        admittedAt: { type: string, format: date-time }
+      required: [admissionId, ticketId, sessionId, operatorId, admittedAt]
+
+    Scan:
+      type: object
+      description: >-
+        A recorded scan attempt, whether entry was granted or denied.
+        If the outcome is ADMITTED, admissionId identifies the recorded entry.
+        If entry is denied, admissionId is null.
+        Retrying the same request with the same Idempotency-Key returns
+        the original scan result.
+      properties:
+        scanId: { type: string, minLength: 1 }
+        ticketId: { type: string, minLength: 1 }
+        sessionId: { type: string, minLength: 1 }
+        operatorId: { type: string, minLength: 1 }
+        scannedAt: { type: string, format: date-time }
+        outcome:
+          type: string
+          enum: [ADMITTED, ALREADY_USED, REVOKED, WRONG_SESSION, INVALID_CREDENTIAL]
+        admissionId: { type: [string, "null"], minLength: 1 }
+      required: [scanId, ticketId, sessionId, operatorId, scannedAt, outcome, admissionId]
+
+  responses:
+    MalformedRequest:
+      description: The request cannot be read, a header is malformed or the API version is unsupported.
+      content:
+        application/problem+json:
+          schema: { $ref: "#/components/schemas/Problem" }
+
+    Unauthorized:
+      description: A supplied token is invalid, or a protected operation has no valid token.
+      content:
+        application/problem+json:
+          schema: { $ref: "#/components/schemas/Problem" }
+
+    Forbidden:
+      description: The authenticated caller lacks the required role or ownership.
+      content:
+        application/problem+json:
+          schema: { $ref: "#/components/schemas/Problem" }
+
+    NotFound:
+      description: The resource does not exist or is not visible to the caller.
+      content:
+        application/problem+json:
+          schema: { $ref: "#/components/schemas/Problem" }
+
+    Conflict:
+      description: The operation conflicts with current resource state, or the same idempotency key is being processed.
+      content:
+        application/problem+json:
+          schema: { $ref: "#/components/schemas/Problem" }
+
+    UnsupportedMediaType:
+      description: The body is not sent as application/json.
+      content:
+        application/problem+json:
+          schema: { $ref: "#/components/schemas/Problem" }
+
+    ValidationFailed:
+      description: Request values or references are invalid, or an idempotency key was reused with different data.
+      content:
+        application/problem+json:
+          schema: { $ref: "#/components/schemas/Problem" }
+
+    UnexpectedError:
+      description: Other errors use the same Problem format.
+      content:
+        application/problem+json:
+          schema: { $ref: "#/components/schemas/Problem" }
+

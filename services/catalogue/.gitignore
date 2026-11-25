@@ -1,0 +1,21 @@
+# Gradle
+.gradle/
+build/
+out/
+
+# Keep the wrapper jar even if a global ignore excludes jars
+!gradle/wrapper/gradle-wrapper.jar
+
+# IDEs
+.idea/
+*.iml
+.vscode/
+.kotlin/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Local environment overrides: credentials must not be committed
+.env
+*.local.yaml

@@ -1,0 +1,357 @@
+openapi: 3.1.0
+info:
+  title: Notifications API
+  version: 0.1.0
+  description: >-
+    API responsible for creating customer notifications from broker events
+    and tracking email and push delivery attempts, outcomes, and retries.
+    Delivery failures leave the purchase unchanged.
+    Error responses use RFC 9457 Problem Details.
+servers: [{ url: "http://localhost:8085", description: Axum }]
+security: [{ bearerAuth: [] }]
+tags:
+  - { name: Notifications, description: Listing and retrieval of the customer's own notifications. }
+  - { name: Admin, description: Administrative review of deliveries and requests to retry failed deliveries. }
+
+paths:
+  /notifications:
+    get:
+      tags: [Notifications]
+      operationId: listMyNotifications
+      summary: List the customer's notifications
+      description: >-
+        Returns a page of notifications belonging to the authenticated customer.
+        The service identifies the customer from the verified JWT.
+        The optional orderId filter returns only notifications for that order.
+        Notifications are sorted by createdAt descending, then by
+        notificationId descending.
+      parameters:
+        - { $ref: "#/components/parameters/ApiVersion" }
+        - { $ref: "#/components/parameters/Cursor" }
+        - { $ref: "#/components/parameters/Limit" }
+        - { $ref: "#/components/parameters/OrderId" }
+      responses:
+        "200":
+          description: A page of the customer's notifications.
+          headers:
+            Cache-Control: { description: Notification responses use no-store.,
+                             schema: { type: string } }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/NotificationPage" }
+              example: { items: [], nextCursor: null, limit: 50 }
+        "400": { $ref: "#/components/responses/MalformedRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "422": { $ref: "#/components/responses/ValidationFailed" }
+        default: { $ref: "#/components/responses/UnexpectedError" }
+
+  /notifications/{notificationId}:
+    get:
+      tags: [Notifications]
+      operationId: getNotification
+      summary: Get notification details and delivery status
+      description: >-
+        The recipient customer or an administrator can retrieve the notification.
+        The response includes the notification content and current delivery state.
+        The response reports delivery error codes without exposing internal provider diagnostics.
+        Returns 404 if the notification does not exist or is not visible to the caller.
+      parameters:
+        - { $ref: "#/components/parameters/ApiVersion" }
+        - { $ref: "#/components/parameters/NotificationId" }
+      responses:
+        "200":
+          description: The notification details and current delivery state.
+          headers:
+            Cache-Control: { description: Notification responses use no-store.,
+                             schema: { type: string } }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Notification" }
+              example: { notificationId: not_1, customerId: usr_anna,
+                         orderId: ord_1, ticketIds: [tkt_1, tkt_2],
+                         kind: TICKETS_ISSUED,
+                         recipient: { channel: EMAIL, destination: anna@example.com },
+                         subject: Your tickets are ready,
+                         content: Open your order to view your tickets.,
+                         state: DELIVERED, attemptCount: 1,
+                         lastAttemptAt: "2027-07-10T20:07:10+02:00",
+                         lastErrorCode: null, nextAttemptAt: null,
+                         createdAt: "2027-07-10T20:07:05+02:00" }
+        "400": { $ref: "#/components/responses/MalformedRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        default: { $ref: "#/components/responses/UnexpectedError" }
+
+  /admin/notifications:
+    get:
+      tags: [Admin]
+      operationId: listNotificationDeliveries
+      summary: List notification deliveries
+      description: >-
+        Only administrators can retrieve a page of notification deliveries.
+        The optional state filter selects deliveries in the specified state.
+      parameters:
+        - { $ref: "#/components/parameters/ApiVersion" }
+        - { $ref: "#/components/parameters/Cursor" }
+        - { $ref: "#/components/parameters/Limit" }
+        - { $ref: "#/components/parameters/NotificationState" }
+      responses:
+        "200":
+          description: A page of notification deliveries.
+          headers:
+            Cache-Control: { description: Notification responses use no-store.,
+                             schema: { type: string } }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/NotificationPage" }
+              example: { items: [], nextCursor: null, limit: 50 }
+        "400": { $ref: "#/components/responses/MalformedRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "422": { $ref: "#/components/responses/ValidationFailed" }
+        default: { $ref: "#/components/responses/UnexpectedError" }
+
+  /notifications/{notificationId}/retries:
+    post:
+      tags: [Admin]
+      operationId: retryFailedNotification
+      summary: Retry a failed notification
+      description: >-
+        Only administrators can request a retry for a FAILED notification.
+        Notifications records the retry task and the initial response
+        before returning 202 with state REQUESTED.
+        Retrying the same request with the same idempotency key returns
+        the original response. A new request returns 409 if another retry
+        is active or the notification is not FAILED.
+        The delivery history is preserved.
+        GET /notifications/{notificationId} returns the current delivery state.
+      parameters:
+        - { $ref: "#/components/parameters/ApiVersion" }
+        - { $ref: "#/components/parameters/NotificationId" }
+        - { $ref: "#/components/parameters/IdempotencyKey" }
+      responses:
+        "202":
+          description: Retry accepted. Consult the notification URI in Location for progress.
+          headers:
+            Location: { description: Relative URI of the notification whose delivery will be retried,
+                        required: true, schema: { type: string } }
+            Cache-Control: { description: Notification responses use no-store.,
+                             schema: { type: string } }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/NotificationRetry" }
+              example: { retryId: rty_1, notificationId: not_2, state: REQUESTED,
+                         requestedAt: "2027-07-10T20:30:00+02:00" }
+        "400": { $ref: "#/components/responses/MalformedRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "422": { $ref: "#/components/responses/ValidationFailed" }
+        default: { $ref: "#/components/responses/UnexpectedError" }
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: JWT access token issued by Keycloak.
+
+  parameters:
+    ApiVersion:
+      name: X-API-Version
+      in: header
+      required: false
+      description: >-
+        API version requested by the client. Defaults to 1.0 when omitted.
+        Unsupported versions return 400.
+      schema: { type: string, enum: ["1.0"], default: "1.0" }
+
+    Cursor:
+      name: cursor
+      in: query
+      required: false
+      description: >-
+        Opaque nextCursor returned by the previous page.
+        Omit it to request the first page. An invalid cursor returns 422.
+      schema: { type: string }
+
+    Limit:
+      name: limit
+      in: query
+      required: false
+      description: >-
+        Maximum number of items to return per page. Defaults to 50 when omitted.
+        Values above 100 are reduced to 100. Values below 1 return 422.
+        Values that are not integers return 400.
+      schema: { type: integer, minimum: 1, default: 50 }
+
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      description: >-
+        Generate a UUID for each new operation and reuse it when retrying.
+        Keys are scoped to the caller and operation and retained for 24 hours.
+        The same key and request data return the stored response once completed.
+        Reusing a key with different data returns 422.
+        A matching request still in progress returns 409.
+        A missing or invalid key returns 400.
+        The service saves the change, the idempotency key, and the response
+        in the same transaction.
+      schema: { type: string, format: uuid }
+
+    NotificationId:
+      name: notificationId
+      in: path
+      required: true
+      description: Identifier of the notification.
+      schema: { type: string }
+
+    OrderId:
+      name: orderId
+      in: query
+      required: false
+      description: Filter the customer's notifications by order identifier.
+      schema: { type: string, minLength: 1 }
+
+    NotificationState:
+      name: state
+      in: query
+      required: false
+      description: Filter deliveries by their current state.
+      schema: { type: string, enum: [PENDING, SENDING, RETRY_SCHEDULED, DELIVERED, FAILED] }
+
+  schemas:
+    FieldError:
+      type: object
+      description: A validation error associated with a request field.
+      properties:
+        field: { type: string }
+        code: { type: string }
+        detail: { type: string }
+      required: [field, code, detail]
+
+    Problem:
+      type: object
+      description: RFC 9457 Problem Details with a stable code and optional field errors.
+      properties:
+        type: { type: string, format: uri-reference }
+        title: { type: string }
+        status: { type: integer, minimum: 400, maximum: 599 }
+        detail: { type: string }
+        instance: { type: string, format: uri-reference }
+        code: { type: string }
+        errors: { type: array, items: { $ref: "#/components/schemas/FieldError" } }
+      required: [type, title, status, code, instance]
+
+    Notification:
+      type: object
+      description: >-
+        Customer notification with its content and current delivery state.
+        Delivery fields summarise the attempts recorded by Notifications.
+        Ticket references contain ticket IDs only.
+      properties:
+        notificationId: { type: string, minLength: 1 }
+        customerId: { type: string, minLength: 1 }
+        orderId: { type: string, minLength: 1 }
+        ticketIds:
+          type: array
+          maxItems: 10
+          items: { type: string, minLength: 1 }
+        kind:
+          type: string
+          enum: [TICKETS_ISSUED, PAYMENT_FAILED, REFUND_SUCCEEDED,
+                 REFUND_FAILED, ORDER_CANCELLED]
+        recipient:
+          type: object
+          description: Verified email address or registered push destination.
+          properties:
+            channel: { type: string, enum: [EMAIL, PUSH] }
+            destination: { type: string, minLength: 1 }
+          required: [channel, destination]
+          additionalProperties: false
+        subject: { type: string }
+        content: { type: string }
+        state:
+          type: string
+          description: DELIVERED means the delivery provider accepted the message for delivery.
+          enum: [PENDING, SENDING, RETRY_SCHEDULED, DELIVERED, FAILED]
+        attemptCount: { type: integer, minimum: 0 }
+        lastAttemptAt: { type: [string, "null"], format: date-time }
+        lastErrorCode:
+          type: [string, "null"]
+          description: Delivery error code without internal provider diagnostics.
+        nextAttemptAt: { type: [string, "null"], format: date-time }
+        createdAt: { type: string, format: date-time }
+      required: [notificationId, customerId, orderId, ticketIds, kind, recipient,
+                 subject, content, state, attemptCount, lastAttemptAt,
+                 lastErrorCode, nextAttemptAt, createdAt]
+
+    NotificationPage:
+      type: object
+      description: A page of notifications with their current delivery states.
+      properties:
+        items: { type: array, items: { $ref: "#/components/schemas/Notification" } }
+        nextCursor: { type: [string, "null"], description: Opaque cursor. Null on the last page. }
+        limit: { type: integer, minimum: 1, maximum: 100 }
+      required: [items, nextCursor, limit]
+
+    NotificationRetry:
+      type: object
+      description: >-
+        Confirms that an administrator's retry request was accepted.
+        Previous delivery attempts are preserved.
+        GET /notifications/{notificationId} returns the current delivery state.
+      properties:
+        retryId: { type: string, minLength: 1 }
+        notificationId: { type: string, minLength: 1 }
+        state: { type: string, const: REQUESTED }
+        requestedAt: { type: string, format: date-time }
+      required: [retryId, notificationId, state, requestedAt]
+
+  responses:
+    MalformedRequest:
+      description: The request cannot be read, a header is malformed or the API version is unsupported.
+      content:
+        application/problem+json:
+          schema: { $ref: "#/components/schemas/Problem" }
+
+    Unauthorized:
+      description: A supplied token is invalid, or a protected operation has no valid token.
+      content:
+        application/problem+json:
+          schema: { $ref: "#/components/schemas/Problem" }
+
+    Forbidden:
+      description: The authenticated caller lacks the required role or ownership.
+      content:
+        application/problem+json:
+          schema: { $ref: "#/components/schemas/Problem" }
+
+    NotFound:
+      description: The resource does not exist or is not visible to the caller.
+      content:
+        application/problem+json:
+          schema: { $ref: "#/components/schemas/Problem" }
+
+    Conflict:
+      description: The operation conflicts with current resource state, or the same idempotency key is being processed.
+      content:
+        application/problem+json:
+          schema: { $ref: "#/components/schemas/Problem" }
+
+    ValidationFailed:
+      description: Request values or references are invalid, or an idempotency key was reused with different data.
+      content:
+        application/problem+json:
+          schema: { $ref: "#/components/schemas/Problem" }
+
+    UnexpectedError:
+      description: Other errors use the same Problem format.
+      content:
+        application/problem+json:
+          schema: { $ref: "#/components/schemas/Problem" }

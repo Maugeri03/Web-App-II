@@ -1,0 +1,645 @@
+openapi: 3.1.0
+info:
+  title: Payments API
+  version: 0.1.0
+  description: >-
+    API responsible for managing payment attempts, provider checkout sessions,
+    payment webhooks, and refunds. Inventory & Orders supplies the order
+    details and amount, and Payments verifies outcomes with the payment provider.
+    Error responses use RFC 9457 Problem Details.
+servers: [{ url: "http://localhost:8083", description: Spring }]
+security: [{ bearerAuth: [] }]
+tags:
+  - { name: Payments, description: Creation and status checks for payment attempts. }
+  - { name: Checkout Closure, description: Requests to close checkout sessions and checks for any resulting charge. }
+  - { name: Refunds, description: Requests to refund payments and track refund status. }
+  - { name: Webhooks, description: Signed payment updates received from the payment provider. }
+
+paths:
+  /payments:
+    post:
+      tags: [Payments]
+      operationId: createPayment
+      summary: Create a payment attempt
+      description: >-
+        Only Inventory & Orders can create a payment attempt using its service JWT.
+        Payments saves the attempt, the checkout setup task, and the initial
+        response in one transaction before contacting the provider.
+        The initial 201 response has state SESSION_PENDING.
+        Retrying the same request with the same idempotency key returns that response.
+        GET /payments/{paymentId} returns the current state and checkout URL
+        when available. A different key for an order with an existing payment
+        returns 409 with the payment URI in Location.
+        Payments uses a stable provider idempotency key and bounded retries,
+        and verifies the outcome after a timeout before marking the attempt as FAILED.
+      parameters:
+        - { $ref: "#/components/parameters/ApiVersion" }
+        - { $ref: "#/components/parameters/IdempotencyKey" }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/PaymentCreateRequest" }
+            example: { orderId: ord_1, customerId: usr_anna,
+                       amount: { amount: "16.00", currency: EUR },
+                       checkoutDeadline: "2027-07-10T20:20:00+02:00" }
+      responses:
+        "201":
+          description: Payment attempt created. Checkout setup is pending.
+          headers:
+            Location: { description: Relative URI of the created payment,
+                        required: true, schema: { type: string } }
+            Cache-Control: { description: Payment responses use no-store.,
+                             schema: { type: string } }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Payment" }
+              example: { paymentId: pay_1, orderId: ord_1, customerId: usr_anna,
+                         amount: { amount: "16.00", currency: EUR },
+                         checkoutDeadline: "2027-07-10T20:20:00+02:00",
+                         state: SESSION_PENDING,
+                         providerSessionId: null, providerTransactionId: null,
+                         checkoutUrl: null, checkoutExpiresAt: null,
+                         createdAt: "2027-07-10T20:05:02+02:00",
+                         updatedAt: "2027-07-10T20:05:02+02:00" }
+        "400": { $ref: "#/components/responses/MalformedRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409":
+          description: >-
+            A payment already exists for the order, the resource state prevents
+            the operation, or a request with the same key is still in progress.
+          headers:
+            Location: { description: Existing payment URI when the error code is payment_already_exists.,
+                        schema: { type: string } }
+          content:
+            application/problem+json:
+              schema: { $ref: "#/components/schemas/Problem" }
+        "415": { $ref: "#/components/responses/UnsupportedMediaType" }
+        "422": { $ref: "#/components/responses/ValidationFailed" }
+        default: { $ref: "#/components/responses/UnexpectedError" }
+
+    get:
+      tags: [Payments]
+      operationId: findPaymentByOrder
+      summary: Find a payment by order
+      description: >-
+        Inventory & Orders or an administrator can look up the payment
+        for the specified order. Returns 404 if no payment exists for that order.
+        This operation retrieves an existing payment for the specified order.
+      parameters:
+        - { $ref: "#/components/parameters/ApiVersion" }
+        - { $ref: "#/components/parameters/OrderId" }
+      responses:
+        "200":
+          description: The current payment details for the order.
+          headers:
+            Cache-Control: { description: Payment responses use no-store.,
+                             schema: { type: string } }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Payment" }
+              example: { paymentId: pay_1, orderId: ord_1, customerId: usr_anna,
+                         amount: { amount: "16.00", currency: EUR },
+                         checkoutDeadline: "2027-07-10T20:20:00+02:00",
+                         state: SESSION_PENDING,
+                         providerSessionId: null, providerTransactionId: null,
+                         checkoutUrl: null, checkoutExpiresAt: null,
+                         createdAt: "2027-07-10T20:05:02+02:00",
+                         updatedAt: "2027-07-10T20:05:02+02:00" }
+        "400": { $ref: "#/components/responses/MalformedRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "422": { $ref: "#/components/responses/ValidationFailed" }
+        default: { $ref: "#/components/responses/UnexpectedError" }
+
+  /payments/{paymentId}:
+    get:
+      tags: [Payments]
+      operationId: getPayment
+      summary: Get payment and checkout status
+      description: >-
+        Inventory & Orders or an administrator can retrieve the current payment state.
+        SESSION_PENDING means checkout setup is in progress.
+        PENDING means Payments is waiting for a verified payment outcome.
+        The response includes the checkout URL when it is available
+        and the checkout is open.
+      parameters:
+        - { $ref: "#/components/parameters/ApiVersion" }
+        - { $ref: "#/components/parameters/PaymentId" }
+      responses:
+        "200":
+          description: The current payment state and checkout details.
+          headers:
+            Cache-Control: { description: Payment responses use no-store.,
+                             schema: { type: string } }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Payment" }
+              example: { paymentId: pay_1, orderId: ord_1, customerId: usr_anna,
+                         amount: { amount: "16.00", currency: EUR },
+                         checkoutDeadline: "2027-07-10T20:20:00+02:00",
+                         state: PENDING, providerSessionId: ps_1,
+                         providerTransactionId: null,
+                         checkoutUrl: "https://checkout.example.com/sessions/ps_1",
+                         checkoutExpiresAt: "2027-07-10T20:20:00+02:00",
+                         createdAt: "2027-07-10T20:05:02+02:00",
+                         updatedAt: "2027-07-10T20:05:10+02:00" }
+        "400": { $ref: "#/components/responses/MalformedRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        default: { $ref: "#/components/responses/UnexpectedError" }
+
+  /payments/{paymentId}/closure:
+    post:
+      tags: [Checkout Closure]
+      operationId: requestCheckoutClosure
+      summary: Request checkout closure
+      description: >-
+        Only Inventory & Orders can request checkout closure using its service JWT.
+        Payments records the closure task before returning 202 with state REQUESTED.
+        Payments coordinates closure with checkout creation so that no usable
+        checkout can become available after closure is confirmed.
+        The closure reports PAYMENT_SUCCEEDED if Payments verifies a successful
+        charge, or CLOSED_WITHOUT_CHARGE if it verifies closure without a charge.
+        If the provider does not respond in time, Payments checks again
+        to determine whether the customer was charged.
+      parameters:
+        - { $ref: "#/components/parameters/ApiVersion" }
+        - { $ref: "#/components/parameters/PaymentId" }
+        - { $ref: "#/components/parameters/IdempotencyKey" }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CheckoutCloseRequest" }
+      responses:
+        "202":
+          description: Checkout closure accepted. Consult the URI in Location for progress.
+          headers:
+            Location: { description: Relative URI used to retrieve the checkout closure,
+                        required: true, schema: { type: string } }
+            Cache-Control: { description: Checkout closure responses use no-store.,
+                             schema: { type: string } }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/CheckoutClosure" }
+              example: { closureId: clo_1, paymentId: pay_1, state: REQUESTED,
+                         createdAt: "2027-07-10T20:20:00+02:00" }
+        "400": { $ref: "#/components/responses/MalformedRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "415": { $ref: "#/components/responses/UnsupportedMediaType" }
+        "422": { $ref: "#/components/responses/ValidationFailed" }
+        default: { $ref: "#/components/responses/UnexpectedError" }
+
+    get:
+      tags: [Checkout Closure]
+      operationId: getCheckoutClosure
+      summary: Get checkout closure status
+      description: >-
+        Inventory & Orders or an administrator can retrieve the current
+        checkout closure state. REQUESTED means Payments has accepted the
+        request. VERIFYING means Payments is checking the provider outcome.
+        CLOSED_WITHOUT_CHARGE confirms that checkout is closed and no charge
+        occurred. PAYMENT_SUCCEEDED confirms that a charge occurred.
+        FAILED indicates that closure failed and the absence of a charge
+        has not been established by that result.
+        Returns 404 if the payment or its closure request does not exist.
+      parameters:
+        - { $ref: "#/components/parameters/ApiVersion" }
+        - { $ref: "#/components/parameters/PaymentId" }
+      responses:
+        "200":
+          description: The current checkout closure state.
+          headers:
+            Cache-Control: { description: Checkout closure responses use no-store.,
+                             schema: { type: string } }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/CheckoutClosure" }
+              example: { closureId: clo_1, paymentId: pay_1, state: VERIFYING,
+                         createdAt: "2027-07-10T20:20:00+02:00" }
+        "400": { $ref: "#/components/responses/MalformedRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        default: { $ref: "#/components/responses/UnexpectedError" }
+
+  /payments/{paymentId}/refunds:
+    post:
+      tags: [Refunds]
+      operationId: requestPaymentRefund
+      summary: Request a full refund
+      description: >-
+        Only Inventory & Orders can request a refund using its service JWT.
+        The order must match the payment, and the refund amount must equal
+        the full amount charged.
+        Payments saves the refund and the initial response before returning
+        202 with state REQUESTED. It calls the provider outside the database
+        transaction using a stable idempotency key.
+        The HTTP request and the RefundRequested message share the same refund
+        operation. Only one full refund can be recorded per payment, even if
+        requests arrive with different idempotency keys.
+      parameters:
+        - { $ref: "#/components/parameters/ApiVersion" }
+        - { $ref: "#/components/parameters/PaymentId" }
+        - { $ref: "#/components/parameters/IdempotencyKey" }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/RefundCreateRequest" }
+            example: { orderId: ord_1, amount: { amount: "16.00", currency: EUR },
+                       reason: Customer requested cancellation. }
+      responses:
+        "202":
+          description: Refund request accepted. Consult the URI in Location for progress.
+          headers:
+            Location: { description: Relative URI used to retrieve the refund,
+                        required: true, schema: { type: string } }
+            Cache-Control: { description: Refund responses use no-store.,
+                             schema: { type: string } }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Refund" }
+              example: { refundId: ref_1, paymentId: pay_1, orderId: ord_1,
+                         amount: { amount: "16.00", currency: EUR },
+                         reason: Customer requested cancellation.,
+                         state: REQUESTED, providerRefundId: null,
+                         createdAt: "2027-07-09T20:01:00+02:00",
+                         updatedAt: "2027-07-09T20:01:00+02:00" }
+        "400": { $ref: "#/components/responses/MalformedRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "415": { $ref: "#/components/responses/UnsupportedMediaType" }
+        "422": { $ref: "#/components/responses/ValidationFailed" }
+
+  /refunds/{refundId}:
+    get:
+      tags: [Refunds]
+      operationId: getRefund
+      summary: Get refund status
+      description: >-
+        Inventory & Orders or an administrator can retrieve the current refund state.
+        REQUESTED means Payments has accepted the refund request.
+        PENDING means Payments is waiting for a verified refund outcome.
+        The response includes the provider refund reference when available.
+        Once the refund outcome is verified, Payments publishes RefundSucceeded
+        or RefundFailed through the broker to notify Inventory & Orders.
+      parameters:
+        - { $ref: "#/components/parameters/ApiVersion" }
+        - { $ref: "#/components/parameters/RefundId" }
+      responses:
+        "200":
+          description: The current refund details.
+          headers:
+            Cache-Control: { description: Refund responses use no-store.,
+                             schema: { type: string } }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Refund" }
+              example: { refundId: ref_1, paymentId: pay_1, orderId: ord_1,
+                         amount: { amount: "16.00", currency: EUR },
+                         reason: Order cancellation requested by the customer.,
+                         state: PENDING, providerRefundId: pr_1,
+                         createdAt: "2027-07-09T20:00:00+02:00",
+                         updatedAt: "2027-07-09T20:01:00+02:00" }
+        "400": { $ref: "#/components/responses/MalformedRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        default: { $ref: "#/components/responses/UnexpectedError" }
+
+  /webhooks/payment-provider:
+    post:
+      tags: [Webhooks]
+      operationId: receivePaymentProviderWebhook
+      summary: Receive a signed provider webhook
+      description: >-
+        Receives signed payment and refund updates from the payment provider.
+        Payments verifies the signature, then records the webhook before
+        returning 200. A duplicate event ID also returns 200 without
+        scheduling processing again. If the receipt cannot be recorded
+        because of a temporary failure, Payments returns 503.
+        Payments processes recorded events asynchronously, verifies the
+        provider references, amount, and currency, and saves verified
+        state changes and their outbox messages in the same transaction.
+        This draft uses a sandbox payload and signature scheme. The final
+        integration follows the selected provider's webhook protocol.
+      parameters:
+        - { $ref: "#/components/parameters/ApiVersion" }
+        - name: X-Provider-Timestamp
+          in: header
+          required: true
+          description: Unix timestamp in seconds included in the webhook signature calculation.
+          schema: { type: string, pattern: "^[0-9]{10,}$" }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ProviderWebhookRequest" }
+      responses:
+        "200":
+          description: Webhook receipt recorded or already known.
+          headers:
+            Cache-Control: { description: Webhook acknowledgements use no-store.,
+                             schema: { type: string } }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/WebhookAcknowledgement" }
+              example: { received: true }
+        "400": { $ref: "#/components/responses/MalformedRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "415": { $ref: "#/components/responses/UnsupportedMediaType" }
+        "422": { $ref: "#/components/responses/ValidationFailed" }
+        "503": { $ref: "#/components/responses/ServiceUnavailable" }
+        default: { $ref: "#/components/responses/UnexpectedError" }
+      security: [{ providerSignature: [] }]
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: JWT access token issued by Keycloak for a user or a service.
+
+    providerSignature:
+      type: apiKey
+      in: header
+      name: X-Provider-Signature
+      description: >-
+        Signature sent by the provider for sandbox webhooks and verified by Payments.
+
+  parameters:
+    ApiVersion:
+      name: X-API-Version
+      in: header
+      required: false
+      description: >-
+        API version requested by the client. Defaults to 1.0 when omitted.
+        Unsupported versions return 400.
+      schema: { type: string, enum: ["1.0"], default: "1.0" }
+
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      description: >-
+        Generate a UUID for each new operation and reuse it when retrying.
+        Keys are scoped to the caller and operation and retained for 24 hours.
+        The same key and request data return the stored response once completed.
+        Reusing a key with different data returns 422.
+        A matching request still in progress returns 409.
+        A missing or invalid key returns 400.
+        The service saves the change, the idempotency key, and the response
+        in the same transaction.
+      schema: { type: string, format: uuid }
+
+    PaymentId:
+      name: paymentId
+      in: path
+      required: true
+      description: Identifier of the payment.
+      schema: { type: string }
+
+    RefundId:
+      name: refundId
+      in: path
+      required: true
+      description: Identifier of the refund.
+      schema: { type: string }
+
+    OrderId:
+      name: orderId
+      in: query
+      required: true
+      description: Identifier of the order.
+      schema: { type: string, minLength: 1 }
+
+  schemas:
+    Money:
+      type: object
+      description: EUR amount represented as a decimal string with two fractional digits.
+      properties:
+        amount: { type: string, pattern: '^(0|[1-9][0-9]*)\.[0-9]{2}$', examples: ["24.00"] }
+        currency: { type: string, const: EUR }
+      required: [amount, currency]
+      additionalProperties: false
+
+    FieldError:
+      type: object
+      description: A validation error associated with a request field.
+      properties:
+        field: { type: string }
+        code: { type: string }
+        detail: { type: string }
+      required: [field, code, detail]
+
+    Problem:
+      type: object
+      description: RFC 9457 Problem Details with a stable code and optional field errors.
+      properties:
+        type: { type: string, format: uri-reference }
+        title: { type: string }
+        status: { type: integer, minimum: 400, maximum: 599 }
+        detail: { type: string }
+        instance: { type: string, format: uri-reference }
+        code: { type: string }
+        errors: { type: array, items: { $ref: "#/components/schemas/FieldError" } }
+      required: [type, title, status, code, instance]
+
+    PaymentCreateRequest:
+      type: object
+      description: >-
+        Order and customer identifiers, agreed order amount, and checkout
+        deadline supplied by Inventory & Orders.
+      properties:
+        orderId: { type: string, minLength: 1 }
+        customerId: { type: string, minLength: 1 }
+        amount: { $ref: "#/components/schemas/Money" }
+        checkoutDeadline: { type: string, format: date-time }
+      required: [orderId, customerId, amount, checkoutDeadline]
+      additionalProperties: false
+
+    Payment:
+      type: object
+      description: >-
+        Payment attempt with its current state and provider references.
+        SESSION_PENDING means checkout setup is in progress.
+        PENDING means the payment outcome is still being verified.
+        A timeout leaves the outcome unverified.
+        Provider reference fields are null until Payments obtains their values.
+        The checkout URL and expiry are null while checkout setup is pending.
+      properties:
+        paymentId: { type: string, minLength: 1 }
+        orderId: { type: string, minLength: 1 }
+        customerId: { type: string, minLength: 1 }
+        amount: { $ref: "#/components/schemas/Money" }
+        checkoutDeadline: { type: string, format: date-time }
+        state:
+          type: string
+          enum: [SESSION_PENDING, PENDING, SUCCEEDED, FAILED,
+                 CANCELLED, REFUND_PENDING, REFUNDED, REFUND_FAILED]
+        providerSessionId: { type: [string, "null"], minLength: 1 }
+        providerTransactionId: { type: [string, "null"], minLength: 1 }
+        checkoutUrl: { type: [string, "null"], format: uri }
+        checkoutExpiresAt: { type: [string, "null"], format: date-time }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+      required: [paymentId, orderId, customerId, amount, checkoutDeadline,
+                 state, providerSessionId, providerTransactionId, checkoutUrl,
+                 checkoutExpiresAt, createdAt, updatedAt]
+
+    CheckoutCloseRequest:
+      type: object
+      description: Reason for requesting closure of a checkout session.
+      properties:
+        reason: { type: string, enum: [CHECKOUT_EXPIRED, ORDER_CANCELLED] }
+      required: [reason]
+      additionalProperties: false
+
+    CheckoutClosure:
+      type: object
+      description: >-
+        Current status of a checkout closure request.
+        CLOSED_WITHOUT_CHARGE confirms that checkout is closed and no charge occurred.
+        PAYMENT_SUCCEEDED confirms that the customer was charged.
+        FAILED means the closure failed and the payment outcome still needs verification.
+      properties:
+        closureId: { type: string, minLength: 1 }
+        paymentId: { type: string, minLength: 1 }
+        state:
+          type: string
+          enum: [REQUESTED, VERIFYING, CLOSED_WITHOUT_CHARGE, PAYMENT_SUCCEEDED, FAILED]
+        createdAt: { type: string, format: date-time }
+      required: [closureId, paymentId, state, createdAt]
+
+    RefundCreateRequest:
+      type: object
+      description: >-
+        Requests a full refund of the captured payment amount.
+        The orderId must match the order associated with the payment.
+        This operation and the RefundRequested message refer to the same
+        refund, with at most one full refund per payment.
+      properties:
+        orderId: { type: string, minLength: 1 }
+        amount: { $ref: "#/components/schemas/Money" }
+        reason: { type: string, minLength: 1 }
+      required: [orderId, amount, reason]
+      additionalProperties: false
+
+    Refund:
+      type: object
+      description: >-
+        Refund details, including its current state and the refund ID
+        assigned by the payment provider.
+        REQUESTED means Payments has recorded the request.
+        PENDING means the refund outcome is still being verified.
+        The provider refund reference is null until Payments obtains it.
+      properties:
+        refundId: { type: string, minLength: 1 }
+        paymentId: { type: string, minLength: 1 }
+        orderId: { type: string, minLength: 1 }
+        amount: { $ref: "#/components/schemas/Money" }
+        reason: { type: string, minLength: 1 }
+        state: { type: string, enum: [REQUESTED, PENDING, SUCCEEDED, FAILED] }
+        providerRefundId: { type: [string, "null"], minLength: 1 }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+      required: [refundId, paymentId, orderId, amount, reason, state,
+                 providerRefundId, createdAt, updatedAt]
+
+    ProviderWebhookRequest:
+      type: object
+      description: >-
+        Sandbox webhook payload for payment and refund updates.
+        The provider reuses the same eventId when retrying delivery.
+      properties:
+        eventId: { type: string, minLength: 1 }
+        eventType:
+          type: string
+          enum: [PAYMENT_PENDING, PAYMENT_SUCCEEDED, PAYMENT_FAILED,
+                 PAYMENT_CANCELLED, REFUND_PENDING, REFUND_SUCCEEDED, REFUND_FAILED]
+        occurredAt: { type: string, format: date-time }
+        providerSessionId: { type: string, minLength: 1 }
+        providerTransactionId: { type: [string, "null"], minLength: 1 }
+        providerRefundId: { type: [string, "null"], minLength: 1 }
+        orderId: { type: string, minLength: 1 }
+        amount: { $ref: "#/components/schemas/Money" }
+      required: [eventId, eventType, occurredAt, providerSessionId,
+                 providerTransactionId, providerRefundId, orderId, amount]
+      additionalProperties: false
+
+    WebhookAcknowledgement:
+      type: object
+      description: >-
+        Confirms that Payments has recorded the webhook or recognised an
+        already recorded event. Payments may still need to process the webhook after acknowledging receipt.
+      properties:
+        received: { type: boolean, const: true }
+      required: [received]
+
+  responses:
+    MalformedRequest:
+      description: The request cannot be read, a header is malformed or the API version is unsupported.
+      content:
+        application/problem+json:
+          schema: { $ref: "#/components/schemas/Problem" }
+
+    Unauthorized:
+      description: >-
+        A supplied token is invalid, or a protected operation has no valid token.
+        For the webhook, the provider signature is missing or invalid.
+      content:
+        application/problem+json:
+          schema: { $ref: "#/components/schemas/Problem" }
+
+    Forbidden:
+      description: The authenticated caller lacks the required role or ownership.
+      content:
+        application/problem+json:
+          schema: { $ref: "#/components/schemas/Problem" }
+
+    NotFound:
+      description: The resource does not exist or is not visible to the caller.
+      content:
+        application/problem+json:
+          schema: { $ref: "#/components/schemas/Problem" }
+
+    Conflict:
+      description: The operation conflicts with current resource state, or the same idempotency key is being processed.
+      content:
+        application/problem+json:
+          schema: { $ref: "#/components/schemas/Problem" }
+
+    UnsupportedMediaType:
+      description: The body is not sent as application/json.
+      content:
+        application/problem+json:
+          schema: { $ref: "#/components/schemas/Problem" }
+
+    ValidationFailed:
+      description: Request values or references are invalid, or an idempotency key was reused with different data.
+      content:
+        application/problem+json:
+          schema: { $ref: "#/components/schemas/Problem" }
+
+    ServiceUnavailable:
+      description: Payments temporarily cannot record the webhook receipt.
+      content:
+        application/problem+json:
+          schema: { $ref: "#/components/schemas/Problem" }
+
+    UnexpectedError:
+      description: Other errors use the same Problem format.
+      content:
+        application/problem+json:
+          schema: { $ref: "#/components/schemas/Problem" }

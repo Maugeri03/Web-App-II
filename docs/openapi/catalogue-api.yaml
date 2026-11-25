@@ -1,0 +1,1051 @@
+openapi: 3.1.0
+info:
+  title: Catalogue API
+  version: 0.1.0
+  description: >-
+    API responsible for managing venues, seating plans, events, and sessions.
+    Each session includes its sales configuration: the sales window, price
+    tiers, and the seats assigned to each tier.
+    Inventory & Orders manages seat availability.
+    Error responses use RFC 9457 Problem Details.
+servers: [{ url: "http://localhost:8081", description: Spring }]
+security: [{ bearerAuth: [] }]
+tags:
+  - { name: Venues, description: Browse and manage venues. }
+  - { name: Seating Plans, description: Browse and create seating plans for venues. }
+  - { name: Events, description: Browse and manage events and their publication. }
+  - { name: Sessions, description: Manage session schedules and sales configuration. }
+
+paths:
+  /venues:
+    get:
+      tags: [Venues]
+      operationId: listVenues
+      summary: List venues
+      description: >-
+        Returns all venues ordered by venueId.
+        Returns an empty array if there are no venues.
+      parameters:
+        - { $ref: "#/components/parameters/ApiVersion" }
+      responses:
+        "200":
+          description: List of venues
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: "#/components/schemas/Venue" } }
+              example: [{ venueId: ven_1, organiserId: usr_org_1, name: Central Cinema,
+                        address: "1 Via Roma, Turin", timeZone: Europe/Rome, version: 1 }]
+        "400": { $ref: "#/components/responses/MalformedRequest" }
+        default: { $ref: "#/components/responses/UnexpectedError" }
+      security: []
+
+    post:
+      tags: [Venues]
+      operationId: createVenue
+      summary: Create a venue
+      description: >-
+        Organisers and administrators can create venues.
+        The service derives the organiser identifier from the authenticated identity.
+        Retrying the same request with the same idempotency key returns the stored response.
+      parameters:
+        - { $ref: "#/components/parameters/ApiVersion" }
+        - { $ref: "#/components/parameters/IdempotencyKey" }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/VenueWriteRequest" }
+            example: { name: Central Cinema, address: "1 Via Roma, Turin", timeZone: Europe/Rome }
+      responses:
+        "201":
+          description: Venue created
+          headers: { Location: { description: Relative URI of the created venue,
+                    required: true, schema: { type: string } } }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Venue" }
+              example: { venueId: ven_1, organiserId: usr_org_1, name: Central Cinema,
+                        address: "1 Via Roma, Turin", timeZone: Europe/Rome, version: 1 }
+        "400": { $ref: "#/components/responses/MalformedRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "415": { $ref: "#/components/responses/UnsupportedMediaType" }
+        "422": { $ref: "#/components/responses/ValidationFailed" }
+        default: { $ref: "#/components/responses/UnexpectedError" }
+
+  /events:
+    get:
+      tags: [Events]
+      operationId: listEvents
+      summary: List published events
+      description: >-
+        Returns a page of PUBLISHED events ordered by eventId.
+        Events in DRAFT or ARCHIVED state are excluded.
+      parameters:
+        - { $ref: "#/components/parameters/ApiVersion" }
+        - { $ref: "#/components/parameters/Cursor" }
+        - { $ref: "#/components/parameters/Limit" }
+      responses:
+        "200":
+          description: A page of published events
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/EventPage" }
+              example:
+                items: [{ eventId: evt_1, organiserId: usr_org_1,
+                        title: Summer Film Festival, description: A weekend of film screenings,
+                        publicationState: PUBLISHED, version: 1 }]
+                nextCursor: null
+                limit: 50
+        "400": { $ref: "#/components/responses/MalformedRequest" }
+        "422": { $ref: "#/components/responses/ValidationFailed" }
+        default: { $ref: "#/components/responses/UnexpectedError" }
+      security: []
+
+    post:
+      tags: [Events]
+      operationId: createEvent
+      summary: Create an event
+      description: >-
+        Organisers and administrators can create events.
+        The service derives the organiser identifier from the authenticated identity.
+        Only published events are visible in the public catalogue.
+        Retrying the same request with the same idempotency key returns the stored response.
+      parameters:
+        - { $ref: "#/components/parameters/ApiVersion" }
+        - { $ref: "#/components/parameters/IdempotencyKey" }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/EventWriteRequest" }
+            example: { title: Summer Film Festival, description: A weekend of film screenings, publicationState: DRAFT }
+      responses:
+        "201":
+          description: Event created
+          headers: { Location: { description: Relative URI of the created event, required: true, schema: { type: string } } }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Event" }
+              example: { eventId: evt_1, organiserId: usr_org_1,
+                        title: Summer Film Festival, description: A weekend of film screenings,
+                        publicationState: DRAFT, version: 1 }
+        "400": { $ref: "#/components/responses/MalformedRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "415": { $ref: "#/components/responses/UnsupportedMediaType" }
+        "422": { $ref: "#/components/responses/ValidationFailed" }
+        default: { $ref: "#/components/responses/UnexpectedError" }
+
+  /events/{eventId}/sessions:
+    get:
+      tags: [Sessions]
+      operationId: listEventSessions
+      summary: List published event sessions
+      description: >-
+        Returns a page of READY sessions for a PUBLISHED event,
+        ordered by startsAt and then sessionId.
+        Returns 404 if the event does not exist or is not public.
+      parameters:
+        - { $ref: "#/components/parameters/ApiVersion" }
+        - { $ref: "#/components/parameters/Cursor" }
+        - { $ref: "#/components/parameters/Limit" }
+        - { $ref: "#/components/parameters/EventId" }
+      responses:
+        "200":
+          description: A page of sessions
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SessionPage" }
+              example:
+                items:
+                  - { sessionId: ses_1, eventId: evt_1, organiserId: usr_org_1, venueId: ven_1, planId: plan_1,
+                      startsAt: "2027-07-10T21:00:00+02:00", endsAt: "2027-07-10T23:00:00+02:00",
+                      salesOpenAt: "2027-07-05T10:00:00+02:00", salesCloseAt: "2027-07-10T21:00:00+02:00",
+                      priceTiers: [{ priceTierId: tier_1, name: Standard, price: { amount: "8.00", currency: EUR } }],
+                      seatPrices: [{ seatId: seat_a1, priceTierId: tier_1 }],
+                      timeZone: Europe/Rome, startsLocal: "2027-07-10T21:00:00", state: READY, version: 1 }
+                nextCursor: null
+                limit: 50
+        "400": { $ref: "#/components/responses/MalformedRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "422": { $ref: "#/components/responses/ValidationFailed" }
+        default: { $ref: "#/components/responses/UnexpectedError" }
+      security: []
+
+    post:
+      tags: [Sessions]
+      operationId: createSession
+      summary: Create a draft session
+      description: >-
+        The event owner or an administrator can create a session in DRAFT.
+        The organiser must have permission to use the selected venue,
+        and the seating plan must belong to that venue.
+        The service validates the schedule and checks that each seat
+        is assigned to exactly one valid price tier.
+      parameters:
+        - { $ref: "#/components/parameters/ApiVersion" }
+        - { $ref: "#/components/parameters/EventId" }
+        - { $ref: "#/components/parameters/IdempotencyKey" }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/SessionWriteRequest" }
+            example: {
+              venueId: ven_1, planId: plan_1,
+              startsAt: "2027-07-10T21:00:00+02:00",
+              endsAt: "2027-07-10T23:00:00+02:00",
+              salesOpenAt: "2027-07-05T10:00:00+02:00",
+              salesCloseAt: "2027-07-10T21:00:00+02:00",
+              priceTiers: [
+                {
+                  priceTierId: tier_1, name: Standard,
+                  price: { amount: "8.00", currency: EUR }
+                    }
+                  ],
+              seatPrices: [{ seatId: seat_a1, priceTierId: tier_1 }]
+                }
+      responses:
+        "201":
+          description: Session created
+          headers:
+            Location: {
+              description: Relative URI of the created session,
+              required: true, schema: { type: string }
+                }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Session" }
+              example: {
+                sessionId: ses_1, eventId: evt_1, organiserId: usr_org_1,
+                venueId: ven_1, planId: plan_1,
+                startsAt: "2027-07-10T21:00:00+02:00",
+                endsAt: "2027-07-10T23:00:00+02:00",
+                salesOpenAt: "2027-07-05T10:00:00+02:00",
+                salesCloseAt: "2027-07-10T21:00:00+02:00",
+                priceTiers: [
+                  {
+                    priceTierId: tier_1, name: Standard,
+                    price: { amount: "8.00", currency: EUR }
+                      }
+                    ],
+                seatPrices: [{ seatId: seat_a1, priceTierId: tier_1 }],
+                timeZone: Europe/Rome, startsLocal: "2027-07-10T21:00:00",
+                state: DRAFT, version: 1
+                  }
+        "400": { $ref: "#/components/responses/MalformedRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "415": { $ref: "#/components/responses/UnsupportedMediaType" }
+        "422": { $ref: "#/components/responses/ValidationFailed" }
+        default: { $ref: "#/components/responses/UnexpectedError" }
+
+  /venues/{venueId}/seating-plans:
+    get:
+      tags: [Seating Plans]
+      operationId: listSeatingPlans
+      summary: List venue seating plans
+      description: >-
+        Returns the seating plans of an existing venue,
+        ordered by version and then planId.
+        Returns an empty array if the venue has no seating plans.
+        Returns 404 if the venue does not exist.
+      parameters:
+        - { $ref: "#/components/parameters/ApiVersion" }
+        - { $ref: "#/components/parameters/VenueId" }
+      responses:
+        "200":
+          description: List of seating plans
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: "#/components/schemas/SeatingPlan" } }
+              example:
+                - { planId: plan_1, venueId: ven_1, version: 1, name: Screen 1,
+                    seats: [
+                      { seatId: seat_a1, sector: Main, row: A, number: "1" },
+                      { seatId: seat_a2, sector: Main, row: A, number: "2" }
+                    ] }
+        "400": { $ref: "#/components/responses/MalformedRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        default: { $ref: "#/components/responses/UnexpectedError" }
+      security: []
+
+    post:
+      tags: [Seating Plans]
+      operationId: createSeatingPlan
+      summary: Create an immutable seating plan
+      description: >-
+        The venue owner or an administrator can create a seating plan.
+        The service assigns an immutable version.
+        Seat identifiers and physical seat labels must be unique within the plan.
+        Existing sessions keep their original seating plan.
+      parameters:
+        - { $ref: "#/components/parameters/ApiVersion" }
+        - { $ref: "#/components/parameters/VenueId" }
+        - { $ref: "#/components/parameters/IdempotencyKey" }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/SeatingPlanCreateRequest" }
+            example: { name: Screen 1,
+              seats: [
+                { seatId: seat_a1, sector: Main, row: A, number: "1" },
+                { seatId: seat_a2, sector: Main, row: A, number: "2" }
+              ] }
+      responses:
+        "201":
+          description: Seating plan created
+          headers:
+            Location: { description: Relative URI of the created seating plan,
+                        required: true, schema: { type: string } }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SeatingPlan" }
+              example: { planId: plan_1, venueId: ven_1, version: 1, name: Screen 1,
+                seats: [
+                  { seatId: seat_a1, sector: Main, row: A, number: "1" },
+                  { seatId: seat_a2, sector: Main, row: A, number: "2" }
+                ] }
+        "400": { $ref: "#/components/responses/MalformedRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "415": { $ref: "#/components/responses/UnsupportedMediaType" }
+        "422": { $ref: "#/components/responses/ValidationFailed" }
+        default: { $ref: "#/components/responses/UnexpectedError" }
+
+  /venues/{venueId}:
+    get:
+      tags: [Venues]
+      operationId: getVenue
+      summary: Get a venue
+      description: >-
+        Returns the public details of a venue.
+        Returns 404 if the venue does not exist.
+      parameters:
+        - { $ref: "#/components/parameters/ApiVersion" }
+        - { $ref: "#/components/parameters/VenueId" }
+        - { $ref: "#/components/parameters/IfNoneMatch" }
+      responses:
+        "200":
+          description: Venue details
+          headers:
+            ETag: { description: Strong ETag of the venue representation,
+                    schema: { type: string } }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Venue" }
+              example: { venueId: ven_1, organiserId: usr_org_1,
+                         name: Central Cinema, address: "1 Via Roma, Turin",
+                         timeZone: Europe/Rome, version: 1 }
+        "304":
+          description: The representation is unchanged and the response has no body.
+          headers:
+            ETag: { description: Strong ETag of the venue representation,
+                    schema: { type: string } }
+        "400": { $ref: "#/components/responses/MalformedRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        default: { $ref: "#/components/responses/UnexpectedError" }
+      security: []
+
+    put:
+      tags: [Venues]
+      operationId: replaceVenue
+      summary: Update a venue
+      description: >-
+        The venue owner or an administrator can replace the editable venue details.
+        If-Match must match the current ETag.
+        Published session snapshots are unchanged.
+      parameters:
+        - { $ref: "#/components/parameters/ApiVersion" }
+        - { $ref: "#/components/parameters/VenueId" }
+        - { $ref: "#/components/parameters/IfMatch" }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/VenueWriteRequest" }
+            example: { name: Central Cinema, address: "5 Via Milano, Turin", timeZone: Europe/Rome }
+      responses:
+        "200":
+          description: Updated venue details
+          headers:
+            ETag: { description: Strong ETag of the updated venue representation,
+                    schema: { type: string } }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Venue" }
+              example: { venueId: ven_1, organiserId: usr_org_1,
+                         name: Central Cinema, address: "5 Via Milano, Turin",
+                         timeZone: Europe/Rome, version: 2 }
+        "400": { $ref: "#/components/responses/MalformedRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "412": { $ref: "#/components/responses/PreconditionFailed" }
+        "415": { $ref: "#/components/responses/UnsupportedMediaType" }
+        "422": { $ref: "#/components/responses/ValidationFailed" }
+        "428": { $ref: "#/components/responses/PreconditionRequired" }
+        default: { $ref: "#/components/responses/UnexpectedError" }
+
+  /seating-plans/{planId}:
+    get:
+      tags: [Seating Plans]
+      operationId: getSeatingPlan
+      summary: Get a seating plan
+      description: >-
+        Returns the public details and numbered seats of a seating plan.
+        Seat availability is managed by Inventory & Orders.
+      parameters:
+        - { $ref: "#/components/parameters/ApiVersion" }
+        - { $ref: "#/components/parameters/PlanId" }
+        - { $ref: "#/components/parameters/IfNoneMatch" }
+      responses:
+        "200":
+          description: Seating plan details
+          headers:
+            ETag: { description: Strong ETag of the seating plan representation,
+                    schema: { type: string } }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SeatingPlan" }
+              example: { planId: plan_1, venueId: ven_1, version: 1, name: Screen 1,
+                seats: [
+                  { seatId: seat_a1, sector: Main, row: A, number: "1" },
+                  { seatId: seat_a2, sector: Main, row: A, number: "2" }
+                ] }
+        "304":
+          description: The representation is unchanged and the response has no body.
+          headers:
+            ETag: { description: Strong ETag of the seating plan representation,
+                    schema: { type: string } }
+        "400": { $ref: "#/components/responses/MalformedRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        default: { $ref: "#/components/responses/UnexpectedError" }
+      security: []
+
+  /events/{eventId}:
+    get:
+      tags: [Events]
+      operationId: getEvent
+      summary: Get an event
+      description: >-
+        Published events are public.
+        Only the event owner or an administrator can view events in other states.
+        Returns 404 if the event does not exist or is not visible to the caller.
+        Private responses use Cache-Control no-store.
+      parameters:
+        - { $ref: "#/components/parameters/ApiVersion" }
+        - { $ref: "#/components/parameters/EventId" }
+        - { $ref: "#/components/parameters/IfNoneMatch" }
+      responses:
+        "200":
+          description: Event details
+          headers:
+            ETag: { description: Strong ETag of the event representation,
+                    schema: { type: string } }
+            Cache-Control: { description: Cache directives. Private event responses use no-store.,
+                             schema: { type: string } }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Event" }
+              example: { eventId: evt_1, organiserId: usr_org_1,
+                         title: The Last Voyage,
+                         description: A science fiction film about a crew travelling to a distant planet.,
+                         publicationState: PUBLISHED, version: 1 }
+        "304":
+          description: The representation is unchanged and the response has no body.
+          headers:
+            ETag: { description: Strong ETag of the event representation,
+                    schema: { type: string } }
+        "400": { $ref: "#/components/responses/MalformedRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        default: { $ref: "#/components/responses/UnexpectedError" }
+      security: [{}, { bearerAuth: [] }]
+
+    put:
+      tags: [Events]
+      operationId: replaceEvent
+      summary: Update an event
+      description: >-
+        The event owner or an administrator can replace the editable event details
+        and publication state. If-Match must match the current ETag.
+        Archiving hides the event from the public catalogue and leaves existing
+        purchases unchanged.
+      parameters:
+        - { $ref: "#/components/parameters/ApiVersion" }
+        - { $ref: "#/components/parameters/EventId" }
+        - { $ref: "#/components/parameters/IfMatch" }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/EventWriteRequest" }
+            example: { title: The Last Voyage,
+                       description: A science fiction film about a crew travelling to a distant planet for the first time.,
+                       publicationState: PUBLISHED }
+      responses:
+        "200":
+          description: Updated event details
+          headers:
+            ETag: { description: Strong ETag of the updated event representation,
+                    schema: { type: string } }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Event" }
+              example: { eventId: evt_1, organiserId: usr_org_1,
+                         title: The Last Voyage,
+                         description: A science fiction film about a crew travelling to a distant planet for the first time.,
+                         publicationState: PUBLISHED, version: 2 }
+        "400": { $ref: "#/components/responses/MalformedRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "412": { $ref: "#/components/responses/PreconditionFailed" }
+        "415": { $ref: "#/components/responses/UnsupportedMediaType" }
+        "422": { $ref: "#/components/responses/ValidationFailed" }
+        "428": { $ref: "#/components/responses/PreconditionRequired" }
+        default: { $ref: "#/components/responses/UnexpectedError" }
+
+  /sessions/{sessionId}:
+    get:
+      tags: [Sessions]
+      operationId: getSession
+      summary: Get a session
+      description: >-
+        READY sessions of published events are public.
+        Only the owner or an administrator can view a non-public session.
+        Returns 404 if the session does not exist or is not visible to the caller.
+        Private responses use Cache-Control no-store.
+        Sales also require an open sales window.
+      parameters:
+        - { $ref: "#/components/parameters/ApiVersion" }
+        - { $ref: "#/components/parameters/SessionId" }
+        - { $ref: "#/components/parameters/IfNoneMatch" }
+      responses:
+        "200":
+          description: Session details
+          headers:
+            ETag: { description: Strong ETag of the session representation,
+                    schema: { type: string } }
+            Cache-Control: { description: Private session responses use no-store.,
+                             schema: { type: string } }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Session" }
+              example: { sessionId: ses_1, eventId: evt_1, organiserId: usr_org_1,
+                         venueId: ven_1, planId: plan_1,
+                         startsAt: "2027-07-10T21:00:00+02:00",
+                         endsAt: "2027-07-10T23:00:00+02:00",
+                         salesOpenAt: "2027-07-05T10:00:00+02:00",
+                         salesCloseAt: "2027-07-10T21:00:00+02:00",
+                         priceTiers: [
+                           { priceTierId: tier_1, name: Standard,
+                             price: { amount: "8.00", currency: EUR } }
+                             ],
+                         seatPrices: [{ seatId: seat_a1, priceTierId: tier_1 }],
+                         timeZone: Europe/Rome, startsLocal: "2027-07-10T21:00:00",
+                         state: READY, version: 1 }
+        "304":
+          description: The representation is unchanged and the response has no body.
+          headers:
+            ETag: { description: Strong ETag of the session representation,
+                    schema: { type: string } }
+        "400": { $ref: "#/components/responses/MalformedRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        default: { $ref: "#/components/responses/UnexpectedError" }
+      security: [{}, { bearerAuth: [] }]
+
+    put:
+      tags: [Sessions]
+      operationId: replaceSession
+      summary: Update a draft session
+      description: >-
+        The session owner or an administrator can update a session only
+        while it is in DRAFT. If-Match must match the current ETag.
+        Published session configuration is immutable.
+      parameters:
+        - { $ref: "#/components/parameters/ApiVersion" }
+        - { $ref: "#/components/parameters/SessionId" }
+        - { $ref: "#/components/parameters/IfMatch" }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/SessionWriteRequest" }
+            example: { venueId: ven_1, planId: plan_1,
+                       startsAt: "2027-07-10T21:30:00+02:00",
+                       endsAt: "2027-07-10T23:30:00+02:00",
+                       salesOpenAt: "2027-07-05T10:00:00+02:00",
+                       salesCloseAt: "2027-07-10T21:30:00+02:00",
+                       priceTiers: [
+                         { priceTierId: tier_1, name: Standard,
+                           price: { amount: "8.00", currency: EUR } }
+                           ],
+                       seatPrices: [{ seatId: seat_a1, priceTierId: tier_1 }] }
+      responses:
+        "200":
+          description: Updated draft session
+          headers:
+            ETag: { description: Strong ETag of the updated session representation,
+                    schema: { type: string } }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Session" }
+              example: { sessionId: ses_1, eventId: evt_1, organiserId: usr_org_1,
+                         venueId: ven_1, planId: plan_1,
+                         startsAt: "2027-07-10T21:30:00+02:00",
+                         endsAt: "2027-07-10T23:30:00+02:00",
+                         salesOpenAt: "2027-07-05T10:00:00+02:00",
+                         salesCloseAt: "2027-07-10T21:30:00+02:00",
+                         priceTiers: [
+                           { priceTierId: tier_1, name: Standard,
+                             price: { amount: "8.00", currency: EUR } }
+                             ],
+                         seatPrices: [{ seatId: seat_a1, priceTierId: tier_1 }],
+                         timeZone: Europe/Rome, startsLocal: "2027-07-10T21:30:00",
+                         state: DRAFT, version: 2 }
+        "400": { $ref: "#/components/responses/MalformedRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "412": { $ref: "#/components/responses/PreconditionFailed" }
+        "415": { $ref: "#/components/responses/UnsupportedMediaType" }
+        "422": { $ref: "#/components/responses/ValidationFailed" }
+        "428": { $ref: "#/components/responses/PreconditionRequired" }
+        default: { $ref: "#/components/responses/UnexpectedError" }
+
+  /sessions/{sessionId}/publication:
+    post:
+      tags: [Sessions]
+      operationId: publishSession
+      summary: Publish a session
+      description: >-
+        The session owner or an administrator can publish a valid draft session
+        whose event is published. If-Match must match the current ETag.
+        Catalogue freezes the session configuration and saves the inventory setup
+        task before returning 202 Accepted.
+        Outside the database transaction, Catalogue calls Inventory & Orders
+        via PUT /internal/sessions/{sessionId}/inventory using a service JWT
+        and a timeout. Each retry uses the same configuration version.
+        The client can check the session status using GET /sessions/{sessionId}.
+        The status is PROVISIONING while setup is in progress, READY once
+        Inventory & Orders confirms completion, or PROVISIONING_FAILED if setup
+        fails. Customers can reserve seats only when the session is READY
+        and the sales window is open.
+      parameters:
+        - { $ref: "#/components/parameters/ApiVersion" }
+        - { $ref: "#/components/parameters/SessionId" }
+        - { $ref: "#/components/parameters/IdempotencyKey" }
+        - { $ref: "#/components/parameters/IfMatch" }
+      responses:
+        "202":
+          description: Publication accepted. Consult the session for inventory setup progress.
+          headers:
+            Location: { description: Relative URI of the session,
+                        required: true, schema: { type: string } }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Session" }
+              example: { sessionId: ses_1, eventId: evt_1, organiserId: usr_org_1,
+                         venueId: ven_1, planId: plan_1,
+                         startsAt: "2027-07-10T21:30:00+02:00",
+                         endsAt: "2027-07-10T23:30:00+02:00",
+                         salesOpenAt: "2027-07-05T10:00:00+02:00",
+                         salesCloseAt: "2027-07-10T21:30:00+02:00",
+                         priceTiers: [
+                           { priceTierId: tier_1, name: Standard,
+                             price: { amount: "8.00", currency: EUR } }
+                             ],
+                         seatPrices: [{ seatId: seat_a1, priceTierId: tier_1 }],
+                         timeZone: Europe/Rome, startsLocal: "2027-07-10T21:30:00",
+                         state: PROVISIONING, version: 3 }
+        "400": { $ref: "#/components/responses/MalformedRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "412": { $ref: "#/components/responses/PreconditionFailed" }
+        "422": { $ref: "#/components/responses/ValidationFailed" }
+        "428": { $ref: "#/components/responses/PreconditionRequired" }
+        default: { $ref: "#/components/responses/UnexpectedError" }
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: JWT access token issued by Keycloak.
+
+  parameters:
+    ApiVersion:
+      name: X-API-Version
+      in: header
+      required: false
+      description: >-
+        API version requested by the client. Defaults to 1.0 when omitted.
+        Unsupported versions return 400.
+      schema: { type: string, enum: ["1.0"], default: "1.0" }
+
+    Cursor:
+      name: cursor
+      in: query
+      required: false
+      description: >-
+        Opaque nextCursor returned by the previous page.
+        Omit it to request the first page. An invalid cursor returns 422.
+      schema: { type: string }
+
+    Limit:
+      name: limit
+      in: query
+      required: false
+      description: >-
+        Maximum number of items to return per page. Defaults to 50 when omitted.
+        Values above 100 are reduced to 100. Values below 1 return 422.
+        Values that are not integers return 400.
+      schema: { type: integer, minimum: 1, default: 50 }
+
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      description: >-
+        Generate a UUID for each new operation and reuse it when retrying.
+        Keys are scoped to the caller and operation and retained for 24 hours.
+        The same key and request data return the stored response once completed.
+        Reusing a key with different data returns 422.
+        A matching request still in progress returns 409.
+        A missing or invalid key returns 400.
+        The service saves the change, the idempotency key, and the response
+        in the same transaction.
+      schema: { type: string, format: uuid }
+
+    IfMatch:
+      name: If-Match
+      in: header
+      required: true
+      description: >-
+        Strong ETag from a previous GET response.
+        A missing header returns 428. An ETag that does not match the
+        current representation returns 412.
+        For operations using an idempotency key, a matching completed request
+        returns its stored response before the ETag check.
+      schema: { type: string }
+
+    IfNoneMatch:
+      name: If-None-Match
+      in: header
+      required: false
+      description: >-
+        ETag from a previous GET response.
+        If the current ETag matches, the service returns 304 without a body.
+      schema: { type: string }
+
+    VenueId:
+      name: venueId
+      in: path
+      required: true
+      description: Identifier of the venue.
+      schema: { type: string }
+
+    PlanId:
+      name: planId
+      in: path
+      required: true
+      description: Identifier of the seating plan.
+      schema: { type: string }
+
+    EventId:
+      name: eventId
+      in: path
+      required: true
+      description: Identifier of the event.
+      schema: { type: string }
+
+    SessionId:
+      name: sessionId
+      in: path
+      required: true
+      description: Identifier of the session.
+      schema: { type: string }
+
+  schemas:
+    Money:
+      type: object
+      description: EUR amount represented as a decimal string with two fractional digits.
+      properties:
+        amount: { type: string, pattern: '^(0|[1-9][0-9]*)\.[0-9]{2}$', examples: ["24.00"] }
+        currency: { type: string, const: EUR }
+      required: [amount, currency]
+      additionalProperties: false
+
+    FieldError:
+      type: object
+      description: A validation error associated with a request field.
+      properties:
+        field: { type: string }
+        code: { type: string }
+        detail: { type: string }
+      required: [field, code, detail]
+
+    Problem:
+      type: object
+      description: RFC 9457 Problem Details with a stable code and optional field errors.
+      properties:
+        type: { type: string, format: uri-reference }
+        title: { type: string }
+        status: { type: integer, minimum: 400, maximum: 599 }
+        detail: { type: string }
+        instance: { type: string, format: uri-reference }
+        code: { type: string }
+        errors: { type: array, items: { $ref: "#/components/schemas/FieldError" } }
+      required: [type, title, status, code, instance]
+
+    Seat:
+      type: object
+      description: A numbered seat in a seating plan.
+      properties:
+        seatId: { type: string, minLength: 1 }
+        sector: { type: string, minLength: 1 }
+        row: { type: string, minLength: 1 }
+        number: { type: string, minLength: 1 }
+      required: [seatId, sector, row, number]
+      additionalProperties: false
+
+    VenueWriteRequest:
+      type: object
+      description: Editable venue details, including a valid IANA time zone.
+      properties:
+        name: { type: string, minLength: 1 }
+        address: { type: string, minLength: 1 }
+        timeZone: { type: string, minLength: 1, examples: [Europe/Rome] }
+      required: [name, address, timeZone]
+      additionalProperties: false
+
+    Venue:
+      type: object
+      description: A venue with its responsible organiser and current version.
+      properties:
+        venueId: { type: string, minLength: 1 }
+        organiserId: { type: string, minLength: 1 }
+        name: { type: string, minLength: 1 }
+        address: { type: string, minLength: 1 }
+        timeZone: { type: string, minLength: 1 }
+        version: { type: integer, minimum: 1 }
+      required: [venueId, organiserId, name, address, timeZone, version]
+
+    SeatingPlanCreateRequest:
+      type: object
+      description: Name and numbered seats of a new seating plan.
+      properties:
+        name: { type: string, minLength: 1 }
+        seats:
+          type: array
+          minItems: 1
+          items: { $ref: "#/components/schemas/Seat" }
+      required: [name, seats]
+      additionalProperties: false
+
+    SeatingPlan:
+      type: object
+      description: An immutable seating layout for a venue.
+      properties:
+        planId: { type: string, minLength: 1 }
+        venueId: { type: string, minLength: 1 }
+        version: { type: integer, minimum: 1 }
+        name: { type: string, minLength: 1 }
+        seats:
+          type: array
+          minItems: 1
+          items: { $ref: "#/components/schemas/Seat" }
+      required: [planId, venueId, version, name, seats]
+
+    Event:
+      type: object
+      description: A catalogue event with its organiser, publication state, and version.
+      properties:
+        eventId: { type: string, minLength: 1 }
+        organiserId: { type: string, minLength: 1 }
+        title: { type: string, minLength: 1 }
+        description: { type: string }
+        publicationState: { type: string, enum: [DRAFT, PUBLISHED, ARCHIVED] }
+        version: { type: integer, minimum: 1 }
+      required: [eventId, organiserId, title, description, publicationState, version]
+
+    EventWriteRequest:
+      type: object
+      description: Editable event details and publication state.
+      properties:
+        title: { type: string, minLength: 1 }
+        description: { type: string }
+        publicationState: { type: string, enum: [DRAFT, PUBLISHED, ARCHIVED] }
+      required: [title, description, publicationState]
+      additionalProperties: false
+
+    PriceTier:
+      type: object
+      description: A named price tier for a session.
+      properties:
+        priceTierId: { type: string, minLength: 1 }
+        name: { type: string, minLength: 1 }
+        price: { $ref: "#/components/schemas/Money" }
+      required: [priceTierId, name, price]
+      additionalProperties: false
+
+    SeatPriceAssignment:
+      type: object
+      description: Assignment of a seat to a price tier for a session.
+      properties:
+        seatId: { type: string, minLength: 1 }
+        priceTierId: { type: string, minLength: 1 }
+      required: [seatId, priceTierId]
+      additionalProperties: false
+
+    SessionWriteRequest:
+      type: object
+      description: >-
+        Editable configuration of a draft session. The seating plan must
+        belong to the selected venue.
+        Sales must open before they close and close no later than the session start.
+        If endsAt is provided as a timestamp, it must be later than startsAt.
+        Every seat in the plan must be assigned to exactly one existing price tier.
+        The startsAt offset must match the venue time zone at the session start.
+        Catalogue preserves the local start time and the venue time zone internally.
+      properties:
+        venueId: { type: string, minLength: 1 }
+        planId: { type: string, minLength: 1 }
+        startsAt: { type: string, format: date-time, examples: ["2027-07-10T21:00:00+02:00"] }
+        endsAt: { type: [string, "null"], format: date-time }
+        salesOpenAt: { type: string, format: date-time }
+        salesCloseAt: { type: string, format: date-time }
+        priceTiers:
+          type: array
+          minItems: 1
+          items: { $ref: "#/components/schemas/PriceTier" }
+        seatPrices:
+          type: array
+          minItems: 1
+          items: { $ref: "#/components/schemas/SeatPriceAssignment" }
+      required: [venueId, planId, startsAt, salesOpenAt, salesCloseAt, priceTiers, seatPrices]
+      additionalProperties: false
+
+    Session:
+      type: object
+      description: A scheduled session with its venue, seating plan, sales configuration, and state.
+      properties:
+        sessionId: { type: string, minLength: 1 }
+        eventId: { type: string, minLength: 1 }
+        organiserId: { type: string, minLength: 1 }
+        venueId: { type: string, minLength: 1 }
+        planId: { type: string, minLength: 1 }
+        startsAt: { type: string, format: date-time }
+        endsAt: { type: [string, "null"], format: date-time }
+        salesOpenAt: { type: string, format: date-time }
+        salesCloseAt: { type: string, format: date-time }
+        priceTiers:
+          type: array
+          minItems: 1
+          items: { $ref: "#/components/schemas/PriceTier" }
+        seatPrices:
+          type: array
+          minItems: 1
+          items: { $ref: "#/components/schemas/SeatPriceAssignment" }
+        timeZone: { type: string }
+        startsLocal: { type: string }
+        state: { type: string, enum: [DRAFT, PROVISIONING, READY, PROVISIONING_FAILED, CANCELLED] }
+        version: { type: integer, minimum: 1 }
+      required: [sessionId, eventId, organiserId, venueId, planId, startsAt,
+                 salesOpenAt, salesCloseAt, priceTiers, seatPrices,
+                 timeZone, startsLocal, state, version]
+
+    EventPage:
+      type: object
+      description: A page of published catalogue events.
+      properties:
+        items: { type: array, items: { $ref: "#/components/schemas/Event" } }
+        nextCursor: { type: [string, "null"], description: Opaque cursor. Null on the last page. }
+        limit: { type: integer, minimum: 1, maximum: 100 }
+      required: [items, nextCursor, limit]
+
+    SessionPage:
+      type: object
+      description: A page of public sessions for an event.
+      properties:
+        items: { type: array, items: { $ref: "#/components/schemas/Session" } }
+        nextCursor: { type: [string, "null"], description: Opaque cursor. Null on the last page. }
+        limit: { type: integer, minimum: 1, maximum: 100 }
+      required: [items, nextCursor, limit]
+
+  responses:
+    MalformedRequest:
+      description: The request cannot be read, a header is malformed or the API version is unsupported.
+      content:
+        application/problem+json:
+          schema: { $ref: "#/components/schemas/Problem" }
+
+    Unauthorized:
+      description: A supplied token is invalid, or a protected operation has no valid token.
+      content:
+        application/problem+json:
+          schema: { $ref: "#/components/schemas/Problem" }
+
+    Forbidden:
+      description: The authenticated caller lacks the required role or ownership.
+      content:
+        application/problem+json:
+          schema: { $ref: "#/components/schemas/Problem" }
+
+    NotFound:
+      description: The resource does not exist or is not visible to the caller.
+      content:
+        application/problem+json:
+          schema: { $ref: "#/components/schemas/Problem" }
+
+    Conflict:
+      description: The operation conflicts with current resource state, or the same idempotency key is being processed.
+      content:
+        application/problem+json:
+          schema: { $ref: "#/components/schemas/Problem" }
+
+    PreconditionFailed:
+      description: If-Match does not match the current resource version.
+      content:
+        application/problem+json:
+          schema: { $ref: "#/components/schemas/Problem" }
+
+    UnsupportedMediaType:
+      description: The body is not sent as application/json.
+      content:
+        application/problem+json:
+          schema: { $ref: "#/components/schemas/Problem" }
+
+    ValidationFailed:
+      description: Request values or references are invalid, or an idempotency key was reused with different data.
+      content:
+        application/problem+json:
+          schema: { $ref: "#/components/schemas/Problem" }
+
+    PreconditionRequired:
+      description: The required If-Match header is absent.
+      content:
+        application/problem+json:
+          schema: { $ref: "#/components/schemas/Problem" }
+
+    UnexpectedError:
+      description: Other errors use the same Problem format.
+      content:
+        application/problem+json:
+          schema: { $ref: "#/components/schemas/Problem" }

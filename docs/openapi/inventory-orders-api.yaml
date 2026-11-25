@@ -1,0 +1,952 @@
+openapi: 3.1.0
+info:
+  title: Inventory & Orders API
+  version: 0.1.0
+  description: >-
+    API responsible for managing seat availability, temporary seat holds,
+    orders, and order cancellations. Orders retain the agreed seat prices.
+    Inventory & Orders coordinates payments and refunds with the Payments service,
+    which owns payment attempts and refund records.
+    Error responses use RFC 9457 Problem Details.
+servers: [{ url: "http://localhost:8082", description: Axum }]
+security: [{ bearerAuth: [] }]
+tags:
+  - { name: Inventory, description: Seat availability for a specific session. }
+  - { name: Holds, description: Temporary seat reservations before checkout. }
+  - { name: Orders, description: Order creation and tracking of purchase status. }
+  - { name: Cancellations, description: Order cancellation requests and their progress. }
+  - { name: Sales, description: Session sales summaries for authorised organisers. }
+  - { name: Internal, description: Service-to-service operations for preparing session inventory. }
+
+paths:
+  /internal/sessions/{sessionId}/inventory:
+    put:
+      tags: [Internal]
+      operationId: provisionSessionInventory
+      summary: Provision session inventory
+      description: >-
+        Only the Catalogue service can call this operation using its service JWT.
+        Inventory & Orders prepares the seats using the frozen session configuration.
+        The first successful request returns 201. An identical retry returns 200.
+        A different configuration for the same session returns 409.
+        Retries preserve the current availability of each seat.
+      parameters:
+        - { $ref: "#/components/parameters/ApiVersion" }
+        - { $ref: "#/components/parameters/SessionId" }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ProvisionInventoryRequest" }
+      responses:
+        "201":
+          description: Session inventory created and ready.
+          headers:
+            Location: { description: Relative URI of the created inventory,
+                        required: true, schema: { type: string } }
+            Cache-Control: { description: Caching policy., schema: { type: string } }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/InventoryConfiguration" }
+              example: { sessionId: ses_1, configurationVersion: 3, state: READY }
+        "200":
+          description: The same inventory configuration already exists and is ready.
+          headers:
+            Cache-Control: { description: Caching policy., schema: { type: string } }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/InventoryConfiguration" }
+              example: { sessionId: ses_1, configurationVersion: 3, state: READY }
+        "400": { $ref: "#/components/responses/MalformedRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "413": { $ref: "#/components/responses/ContentTooLarge" }
+        "415": { $ref: "#/components/responses/UnsupportedMediaType" }
+        "422": { $ref: "#/components/responses/ValidationFailed" }
+        default: { $ref: "#/components/responses/UnexpectedError" }
+
+  /sessions/{sessionId}/seats:
+    get:
+      tags: ["Inventory"]
+      operationId: "getSessionSeats"
+      summary: "Get seat availability"
+      description: "Public paginated availability with optional sector filter. Allocation is only decided by createHold; concurrent buyers may change availability."
+      parameters:
+        - { $ref: "#/components/parameters/ApiVersion" }
+        - { $ref: "#/components/parameters/SessionId" }
+        - { $ref: "#/components/parameters/Cursor" }
+        - { $ref: "#/components/parameters/Limit" }
+        - { name: "sector", in: "query", required: false, schema: { type: "string" }, description: "Filter by sector." }
+      responses:
+        "200":
+          description: "Operation completed."
+          content:
+            application/json: { schema: { $ref: "#/components/schemas/SeatMapPage" } }
+          headers: { Cache-Control: { schema: { type: "string" }, description: "Caching policy." } }
+        "400": { $ref: "#/components/responses/MalformedRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "422": { $ref: "#/components/responses/ValidationFailed" }
+        default: { $ref: "#/components/responses/UnexpectedError" }
+      security: []
+
+  /sessions/{sessionId}/holds:
+    post:
+      tags: [Holds]
+      operationId: createHold
+      summary: Create a temporary seat hold
+      description: >-
+        Customers can create holds when the inventory is ready and sales are open.
+        Each hold can include 1 to 10 distinct seats. The service reserves all
+        requested seats or none.
+        Customers can create multiple holds for the same session as long as
+        their active holds cover no more than 10 seats in total at any given time.
+        Holds expire after 600 seconds. The service identifies the customer
+        from the JWT and uses the prices configured for the session.
+      parameters:
+        - { $ref: "#/components/parameters/ApiVersion" }
+        - { $ref: "#/components/parameters/SessionId" }
+        - { $ref: "#/components/parameters/IdempotencyKey" }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/HoldCreateRequest" }
+            example: { seatIds: [seat_a1, seat_a2] }
+      responses:
+        "201":
+          description: The selected seats are temporarily reserved.
+          headers:
+            Location: { description: Relative URI of the created hold,
+                        required: true, schema: { type: string } }
+            Cache-Control: { description: Hold responses use no-store.,
+                             schema: { type: string }, example: no-store }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Hold" }
+              example: { holdId: hold_1, customerId: usr_anna, sessionId: ses_1,
+                         items: [
+                           { seatId: seat_a1, priceTierId: tier_1,
+                             unitPrice: { amount: "8.00", currency: EUR } },
+                           { seatId: seat_a2, priceTierId: tier_1,
+                             unitPrice: { amount: "8.00", currency: EUR } }
+                         ],
+                         total: { amount: "16.00", currency: EUR }, state: ACTIVE,
+                         createdAt: "2027-07-10T20:00:00+02:00",
+                         expiresAt: "2027-07-10T20:10:00+02:00", version: 1 }
+        "400": { $ref: "#/components/responses/MalformedRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "410": { $ref: "#/components/responses/SalesClosed" }
+        "415": { $ref: "#/components/responses/UnsupportedMediaType" }
+        "422": { $ref: "#/components/responses/ValidationFailed" }
+        default: { $ref: "#/components/responses/UnexpectedError" }
+
+  /holds/{holdId}:
+    get:
+      tags: [Holds]
+      operationId: getHold
+      summary: Get a seat hold
+      description: >-
+        The customer who created the hold or an administrator can retrieve it.
+        Returns 404 if the hold does not exist or is not visible to the caller.
+        An active hold past its expiry is returned as EXPIRED even if
+        background processing has not yet updated it.
+      parameters:
+        - { $ref: "#/components/parameters/ApiVersion" }
+        - { $ref: "#/components/parameters/HoldId" }
+      responses:
+        "200":
+          description: The hold with its current state and expiry time.
+          headers:
+            Cache-Control: { description: Hold responses use no-store.,
+                             schema: { type: string }, example: no-store }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Hold" }
+              example: { holdId: hold_1, customerId: usr_anna, sessionId: ses_1,
+                         items: [
+                           { seatId: seat_a1, priceTierId: tier_1,
+                             unitPrice: { amount: "8.00", currency: EUR } },
+                           { seatId: seat_a2, priceTierId: tier_1,
+                             unitPrice: { amount: "8.00", currency: EUR } }
+                         ],
+                         total: { amount: "16.00", currency: EUR }, state: ACTIVE,
+                         createdAt: "2027-07-10T20:00:00+02:00",
+                         expiresAt: "2027-07-10T20:10:00+02:00", version: 1 }
+        "400": { $ref: "#/components/responses/MalformedRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        default: { $ref: "#/components/responses/UnexpectedError" }
+
+    delete:
+      tags: [Holds]
+      operationId: releaseHold
+      summary: Release a seat hold
+      description: >-
+        Only the customer who created the hold can release it.
+        Releasing an ACTIVE hold sets its state to RELEASED and frees its seats.
+        Releasing a RELEASED or EXPIRED hold returns 204 without further changes.
+        Releasing a CONVERTED hold returns 409.
+        Returns 404 if the hold does not exist or belongs to another customer.
+      parameters:
+        - { $ref: "#/components/parameters/ApiVersion" }
+        - { $ref: "#/components/parameters/HoldId" }
+      responses:
+        "204":
+          description: The hold has been released or has already ended.
+          headers:
+            Cache-Control: { description: Hold responses use no-store.,
+                            schema: { type: string }, example: no-store }
+        "400": { $ref: "#/components/responses/MalformedRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        default: { $ref: "#/components/responses/UnexpectedError" }
+
+  /orders:
+    post:
+      tags: [Orders]
+      operationId: createOrder
+      summary: Create an order from a hold
+      description: >-
+        A customer can create one order from their own active, unexpired hold.
+        The service records the seat prices, marks the hold as CONVERTED,
+        and keeps the seats reserved for the new order.
+        It saves the order, the task to start payment, and the initial response
+        in one transaction. The call to Payments takes place outside that transaction.
+        Retrying the same request with the same idempotency key returns
+        the original 201 response. GET /orders/{orderId} returns the current
+        order state and the checkout URL when available.
+      parameters:
+        - { $ref: "#/components/parameters/ApiVersion" }
+        - { $ref: "#/components/parameters/IdempotencyKey" }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/OrderCreateRequest" }
+            example: { holdId: hold_1 }
+      responses:
+        "201":
+          description: The order has been created and is awaiting payment.
+          headers:
+            Location: { description: Relative URI used to retrieve the created order,
+                        required: true, schema: { type: string } }
+            Cache-Control: { description: Order responses use no-store.,
+                             schema: { type: string }, example: no-store }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/OrderCreated" }
+              example: { orderId: ord_1, state: PENDING_PAYMENT }
+        "400": { $ref: "#/components/responses/MalformedRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "415": { $ref: "#/components/responses/UnsupportedMediaType" }
+        "422": { $ref: "#/components/responses/ValidationFailed" }
+        default: { $ref: "#/components/responses/UnexpectedError" }
+
+    get:
+      tags: [Orders]
+      operationId: listMyOrders
+      summary: List the customer's orders
+      description: >-
+        Returns a page of orders belonging to the authenticated customer.
+        The service identifies the customer from the JWT.
+        Orders are sorted by createdAt descending, then by orderId descending.
+      parameters:
+        - { $ref: "#/components/parameters/ApiVersion" }
+        - { $ref: "#/components/parameters/Cursor" }
+        - { $ref: "#/components/parameters/Limit" }
+      responses:
+        "200":
+          description: A page of the customer's orders.
+          headers:
+            Cache-Control: { description: Order responses use no-store.,
+                             schema: { type: string }, example: no-store }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/OrderPage" }
+              example:
+                items:
+                  - { orderId: ord_1, customerId: usr_anna,
+                      sessionId: ses_1, holdId: hold_1,
+                      items: [
+                        { orderItemId: item_1, seatId: seat_a1, priceTierId: tier_1,
+                          unitPrice: { amount: "8.00", currency: EUR } },
+                        { orderItemId: item_2, seatId: seat_a2, priceTierId: tier_1,
+                          unitPrice: { amount: "8.00", currency: EUR } }
+                      ],
+                      total: { amount: "16.00", currency: EUR }, state: PAID,
+                      paymentId: pay_1, paymentState: SUCCEEDED,
+                      checkoutUrl: null, checkoutExpiresAt: null,
+                      createdAt: "2027-07-10T20:05:00+02:00",
+                      updatedAt: "2027-07-10T20:07:00+02:00", version: 2 }
+                nextCursor: null
+                limit: 50
+        "400": { $ref: "#/components/responses/MalformedRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "422": { $ref: "#/components/responses/ValidationFailed" }
+        default: { $ref: "#/components/responses/UnexpectedError" }
+
+  /orders/{orderId}:
+    get:
+      tags: [Orders]
+      operationId: getOrder
+      summary: Get the current order state
+      description: >-
+        Only the order owner or an administrator can retrieve the order.
+        Returns 404 if the order is missing or not visible to the caller.
+        The checkout URL is returned when available and while checkout is open.
+        While payment is pending, the client must wait at least 2 seconds
+        between requests and follow any longer Retry-After delay.
+        Seats remain reserved after the original hold expires and can be
+        released only once the payment outcome is verified and release is safe.
+      parameters:
+        - { $ref: "#/components/parameters/ApiVersion" }
+        - { $ref: "#/components/parameters/OrderId" }
+      responses:
+        "200":
+          description: The current order state and checkout details.
+          headers:
+            Retry-After: { description: Suggested delay in seconds while work is pending.,
+                           schema: { type: string } }
+            Cache-Control: { description: Order responses use no-store.,
+                             schema: { type: string } }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Order" }
+              example: { orderId: ord_1, customerId: usr_anna,
+                         sessionId: ses_1, holdId: hold_1,
+                         items: [
+                           { orderItemId: item_1, seatId: seat_a1, priceTierId: tier_1,
+                             unitPrice: { amount: "8.00", currency: EUR } },
+                           { orderItemId: item_2, seatId: seat_a2, priceTierId: tier_1,
+                             unitPrice: { amount: "8.00", currency: EUR } }
+                         ],
+                         total: { amount: "16.00", currency: EUR },
+                         state: PENDING_PAYMENT, paymentId: pay_1,
+                         paymentState: SESSION_PENDING,
+                         checkoutUrl: null, checkoutExpiresAt: null,
+                         createdAt: "2027-07-10T20:05:00+02:00",
+                         updatedAt: "2027-07-10T20:05:02+02:00", version: 2 }
+        "400": { $ref: "#/components/responses/MalformedRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        default: { $ref: "#/components/responses/UnexpectedError" }
+
+  /orders/{orderId}/cancellation:
+    post:
+      tags: [Cancellations]
+      operationId: requestOrderCancellation
+      summary: Request full order cancellation
+      description: >-
+        The order owner or an administrator can request full cancellation
+        at least 24 hours before the session starts, provided no ticket has
+        been used. If-Match must match the current order ETag.
+        The service accepts one cancellation per order and returns 202 with
+        cancellation state REQUESTED. Retrying the same accepted request with
+        the same idempotency key returns the original response, even after the deadline.
+        If payment is pending, the cancellation waits in WAITING_PAYMENT_RESOLUTION
+        while the service closes checkout and verifies whether a charge occurred.
+        If no charge occurred, the order becomes CANCELLED. If a charge occurred,
+        the cancellation moves to REFUND_PENDING until a full refund is verified.
+        A fully refunded order becomes REFUNDED. If tickets were issued, the
+        cancellation waits in WAITING_TICKET_REVOCATION until they are revoked.
+        The cancellation becomes COMPLETED once the payment outcome is resolved,
+        any issued tickets are revoked, and the seats are released.
+        The deadline does not apply to system compensation for a paid order
+        that cannot be fulfilled.
+      parameters:
+        - { $ref: "#/components/parameters/ApiVersion" }
+        - { $ref: "#/components/parameters/OrderId" }
+        - { $ref: "#/components/parameters/IdempotencyKey" }
+        - { $ref: "#/components/parameters/IfMatch" }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CancellationRequest" }
+            example: { reason: I can no longer attend. }
+      responses:
+        "202":
+          description: Cancellation request accepted. Consult the URI in Location for progress.
+          headers:
+            Location: { description: Relative URI used to retrieve the cancellation,
+                        required: true, schema: { type: string } }
+            Cache-Control: { description: Cancellation responses use no-store.,
+                             schema: { type: string } }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Cancellation" }
+              example: { cancellationId: can_1, orderId: ord_1,
+                         reason: I can no longer attend.,
+                         state: REQUESTED, seatsReleased: false,
+                         createdAt: "2027-07-09T20:00:00+02:00",
+                         updatedAt: "2027-07-09T20:00:00+02:00" }
+        "400": { $ref: "#/components/responses/MalformedRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "412": { $ref: "#/components/responses/PreconditionFailed" }
+        "415": { $ref: "#/components/responses/UnsupportedMediaType" }
+        "422": { $ref: "#/components/responses/ValidationFailed" }
+        "428": { $ref: "#/components/responses/PreconditionRequired" }
+        default: { $ref: "#/components/responses/UnexpectedError" }
+
+    get:
+      tags: [Cancellations]
+      operationId: getOrderCancellation
+      summary: Get cancellation progress
+      description: >-
+        The order owner or an administrator can retrieve the cancellation.
+        The response reports its current state and whether the seats have
+        been released. REFUND_PENDING means the service is
+        waiting for a verified refund. COMPLETED means the cancellation
+        is finished and the seats have been released.
+        Returns 404 if the order or its cancellation does not exist.
+      parameters:
+        - { $ref: "#/components/parameters/ApiVersion" }
+        - { $ref: "#/components/parameters/OrderId" }
+      responses:
+        "200":
+          description: The current cancellation state and seat release status.
+          headers:
+            Cache-Control: { description: Cancellation responses use no-store.,
+                             schema: { type: string } }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Cancellation" }
+              example: { cancellationId: can_1, orderId: ord_1,
+                         reason: I can no longer attend.,
+                         state: REFUND_PENDING, seatsReleased: false,
+                         createdAt: "2027-07-09T20:00:00+02:00",
+                         updatedAt: "2027-07-09T20:01:00+02:00" }
+        "400": { $ref: "#/components/responses/MalformedRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        default: { $ref: "#/components/responses/UnexpectedError" }
+
+  /organiser/sessions/{sessionId}/sales-summary:
+    get:
+      tags: [Sales]
+      operationId: getSessionSalesSummary
+      summary: Get session sales summary
+      description: >-
+        The session organiser or an administrator can retrieve the sales summary.
+        Returns counts of FREE, HELD, and SOLD seats and gross sales calculated
+        from the session inventory and orders.
+        Returns 404 if the session does not exist or is not visible to the organiser.
+      parameters:
+        - { $ref: "#/components/parameters/ApiVersion" }
+        - { $ref: "#/components/parameters/SessionId" }
+      responses:
+        "200":
+          description: Seat counts and gross sales for the session.
+          headers:
+            Cache-Control: { description: Sales summaries use no-store.,
+                             schema: { type: string } }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SalesSummary" }
+              example: { sessionId: ses_1, freeSeats: 0, heldSeats: 0, soldSeats: 2,
+                         grossSales: { amount: "16.00", currency: EUR },
+                         asOf: "2027-07-10T20:07:00+02:00" }
+        "400": { $ref: "#/components/responses/MalformedRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        default: { $ref: "#/components/responses/UnexpectedError" }
+
+  /internal/orders/{orderId}/ticket-context:
+    get:
+      tags: [Internal]
+      operationId: getTicketOrderContext
+      summary: Get order context for Ticketing
+      description: >-
+        Ticketing verifies the customer's JWT and extracts the customerId.
+        It then calls this endpoint, passing customerId in the query string
+        and its own service JWT in the Authorization header.
+        Inventory & Orders verifies the service JWT to authenticate Ticketing
+        and reads customerId from the query string to check order ownership.
+        It returns 404 if the order does not exist or belongs to another customer.
+        Otherwise, it returns the order state and the expected number of tickets.
+      parameters:
+        - { $ref: "#/components/parameters/ApiVersion" }
+        - { $ref: "#/components/parameters/OrderId" }
+        - name: customerId
+          in: query
+          required: true
+          description: Customer identifier derived by Ticketing from the verified customer JWT.
+          schema: { type: string, minLength: 1, pattern: "^[A-Za-z0-9_-]+$" }
+      responses:
+        "200":
+          description: Verified order ownership context for Ticketing.
+          headers:
+            Cache-Control: { description: Order context responses use no-store.,
+                             schema: { type: string } }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TicketOrderContext" }
+              example: { orderId: ord_1, customerId: usr_anna, sessionId: ses_1,
+                         state: PAID, expectedTicketCount: 2 }
+        "400": { $ref: "#/components/responses/MalformedRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "422": { $ref: "#/components/responses/ValidationFailed" }
+        default: { $ref: "#/components/responses/UnexpectedError" }
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: JWT access token issued by Keycloak for a user or a service.
+
+  parameters:
+    ApiVersion:
+      name: X-API-Version
+      in: header
+      required: false
+      description: >-
+        API version requested by the client. Defaults to 1.0 when omitted.
+        Unsupported versions return 400.
+      schema: { type: string, enum: ["1.0"], default: "1.0" }
+
+    Cursor:
+      name: cursor
+      in: query
+      required: false
+      description: >-
+        Opaque nextCursor returned by the previous page.
+        Omit it to request the first page. An invalid cursor returns 422.
+      schema: { type: string }
+
+    Limit:
+      name: limit
+      in: query
+      required: false
+      description: >-
+        Maximum number of items to return per page. Defaults to 50 when omitted.
+        Values above 100 are reduced to 100. Values below 1 return 422.
+        Values that are not integers return 400.
+      schema: { type: integer, minimum: 1, default: 50 }
+
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      description: >-
+        Generate a UUID for each new operation and reuse it when retrying.
+        Keys are scoped to the caller and operation and retained for 24 hours.
+        The same key and request data return the stored response once completed.
+        Reusing a key with different data returns 422.
+        A matching request still in progress returns 409.
+        A missing or invalid key returns 400.
+        The service saves the change, the idempotency key, and the response
+        in the same transaction.
+      schema: { type: string, format: uuid }
+
+    IfMatch:
+      name: If-Match
+      in: header
+      required: true
+      description: >-
+        Strong ETag from a previous GET response.
+        A missing header returns 428. An ETag that does not match the
+        current representation returns 412.
+        For operations using an idempotency key, a matching completed request
+        returns its stored response before the ETag check.
+      schema: { type: string }
+
+    HoldId:
+      name: holdId
+      in: path
+      required: true
+      description: Identifier of the hold.
+      schema: { type: string }
+
+    OrderId:
+      name: orderId
+      in: path
+      required: true
+      description: Identifier of the order.
+      schema: { type: string }
+
+    SessionId:
+      name: sessionId
+      in: path
+      required: true
+      description: Identifier of the session.
+      schema: { type: string }
+
+  schemas:
+    Money:
+      type: object
+      description: EUR amount represented as a decimal string with two fractional digits.
+      properties:
+        amount: { type: string, pattern: '^(0|[1-9][0-9]*)\.[0-9]{2}$', examples: ["24.00"] }
+        currency: { type: string, const: EUR }
+      required: [amount, currency]
+      additionalProperties: false
+
+    FieldError:
+      type: object
+      description: A validation error associated with a request field.
+      properties:
+        field: { type: string }
+        code: { type: string }
+        detail: { type: string }
+      required: [field, code, detail]
+
+    Problem:
+      type: object
+      description: RFC 9457 Problem Details with a stable code and optional field errors.
+      properties:
+        type: { type: string, format: uri-reference }
+        title: { type: string }
+        status: { type: integer, minimum: 400, maximum: 599 }
+        detail: { type: string }
+        instance: { type: string, format: uri-reference }
+        code: { type: string }
+        errors: { type: array, items: { $ref: "#/components/schemas/FieldError" } }
+      required: [type, title, status, code, instance]
+
+    SeatAvailability:
+      type: object
+      description: A numbered seat with its current availability and price for a session.
+      properties:
+        seatId: { type: string, minLength: 1 }
+        sector: { type: string, minLength: 1 }
+        row: { type: string, minLength: 1 }
+        number: { type: string, minLength: 1 }
+        status: { type: string, enum: [FREE, HELD, SOLD] }
+        price: { $ref: "#/components/schemas/Money" }
+      required: [seatId, sector, row, number, status, price]
+
+    SeatMapPage:
+      type: object
+      description: >-
+        A page of seats for a session, ordered by sector, row, number, and seatId.
+        Availability reflects the current inventory and is checked again
+        when a hold is created.
+      properties:
+        sessionId: { type: string, minLength: 1 }
+        configurationVersion: { type: integer, minimum: 1 }
+        items: { type: array, items: { $ref: "#/components/schemas/SeatAvailability" } }
+        nextCursor: { type: [string, "null"], description: Opaque cursor. Null on the last page. }
+        limit: { type: integer, minimum: 1, maximum: 100 }
+      required: [sessionId, configurationVersion, items, nextCursor, limit]
+
+    HoldItem:
+      type: object
+      description: A seat reserved by a hold with its price tier and unit price.
+      properties:
+        seatId: { type: string, minLength: 1 }
+        priceTierId: { type: string, minLength: 1 }
+        unitPrice: { $ref: "#/components/schemas/Money" }
+      required: [seatId, priceTierId, unitPrice]
+
+    HoldCreateRequest:
+      type: object
+      description: >-
+        Seat identifiers for a temporary hold in one session.
+        The service reserves all requested seats or none.
+      properties:
+        seatIds:
+          type: array
+          items: { type: string, minLength: 1 }
+          minItems: 1
+          maxItems: 10
+          uniqueItems: true
+          examples: [[seat_a1, seat_a2]]
+      required: [seatIds]
+      additionalProperties: false
+
+    Hold:
+      type: object
+      description: >-
+        A temporary seat reservation for one customer and one session.
+        A new hold is ACTIVE for 600 seconds and becomes EXPIRED at its expiry
+        time if still active. Creating an order changes it to CONVERTED and
+        transfers the seat reservation to the order. Releasing an active hold
+        changes it to RELEASED and frees its seats.
+      properties:
+        holdId: { type: string, minLength: 1 }
+        customerId: { type: string, minLength: 1 }
+        sessionId: { type: string, minLength: 1 }
+        items:
+          type: array
+          minItems: 1
+          maxItems: 10
+          items: { $ref: "#/components/schemas/HoldItem" }
+        total: { $ref: "#/components/schemas/Money" }
+        state: { type: string, enum: [ACTIVE, CONVERTED, EXPIRED, RELEASED] }
+        createdAt: { type: string, format: date-time }
+        expiresAt: { type: string, format: date-time }
+        version: { type: integer, minimum: 1 }
+      required: [holdId, customerId, sessionId, items, total, state,
+                 createdAt, expiresAt, version]
+
+    OrderCreateRequest:
+      type: object
+      description: Identifier of the hold used to create an order.
+      properties:
+        holdId: { type: string, minLength: 1 }
+      required: [holdId]
+      additionalProperties: false
+
+    OrderItem:
+      type: object
+      description: A seat in an order with its price tier and agreed unit price.
+      properties:
+        orderItemId: { type: string, minLength: 1 }
+        seatId: { type: string, minLength: 1 }
+        priceTierId: { type: string, minLength: 1 }
+        unitPrice: { $ref: "#/components/schemas/Money" }
+      required: [orderItemId, seatId, priceTierId, unitPrice]
+
+    OrderCreated:
+      type: object
+      description: Initial response when an order is created.
+      properties:
+        orderId: { type: string, minLength: 1 }
+        state: { type: string, const: PENDING_PAYMENT }
+      required: [orderId, state]
+
+    Order:
+      type: object
+      description: >-
+        An order with its reserved seats, agreed prices, and current state.
+        Inventory & Orders reports payment progress from the Payments service.
+        Seats remain reserved after the original hold expires and while
+        the payment outcome is unknown.
+      properties:
+        orderId: { type: string, minLength: 1 }
+        customerId: { type: string, minLength: 1 }
+        sessionId: { type: string, minLength: 1 }
+        holdId: { type: string, minLength: 1 }
+        items:
+          type: array
+          minItems: 1
+          maxItems: 10
+          items: { $ref: "#/components/schemas/OrderItem" }
+        total: { $ref: "#/components/schemas/Money" }
+        state:
+          type: string
+          enum: [PENDING_PAYMENT, PAID, PAYMENT_FAILED, CANCELLATION_PENDING,
+                 CANCELLED, REFUND_PENDING, REFUNDED, REFUND_FAILED]
+        paymentId: { type: [string, "null"], minLength: 1 }
+        paymentState:
+          type: string
+          enum: [NOT_STARTED, SESSION_PENDING, PENDING, SUCCEEDED, FAILED,
+                 CANCELLED, REFUND_PENDING, REFUNDED, REFUND_FAILED]
+        checkoutUrl: { type: [string, "null"], format: uri }
+        checkoutExpiresAt: { type: [string, "null"], format: date-time }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+        version: { type: integer, minimum: 1 }
+      required: [orderId, customerId, sessionId, holdId, items, total, state,
+                 paymentId, paymentState, checkoutUrl, checkoutExpiresAt,
+                 createdAt, updatedAt, version]
+
+    CancellationRequest:
+      type: object
+      description: The reason for requesting cancellation of the entire order.
+      properties:
+        reason: { type: string, minLength: 1 }
+      required: [reason]
+      additionalProperties: false
+
+    Cancellation:
+      type: object
+      description: >-
+        A full order cancellation request and its current progress.
+        The cancellation reaches COMPLETED once the payment outcome is verified,
+        any required refund is confirmed, any issued tickets are revoked,
+        and the seats have been released.
+      properties:
+        cancellationId: { type: string, minLength: 1 }
+        orderId: { type: string, minLength: 1 }
+        reason: { type: string, minLength: 1 }
+        state:
+          type: string
+          enum: [REQUESTED, WAITING_PAYMENT_RESOLUTION, REFUND_PENDING,
+                 WAITING_TICKET_REVOCATION, COMPLETED, FAILED]
+        seatsReleased: { type: boolean }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+      required: [cancellationId, orderId, reason, state, seatsReleased,
+                 createdAt, updatedAt]
+
+    InventorySeat:
+      type: object
+      description: A seat with its location, price tier, and unit price for inventory setup.
+      properties:
+        seatId: { type: string, minLength: 1 }
+        sector: { type: string, minLength: 1 }
+        row: { type: string, minLength: 1 }
+        number: { type: string, minLength: 1 }
+        priceTierId: { type: string, minLength: 1 }
+        unitPrice: { $ref: "#/components/schemas/Money" }
+      required: [seatId, sector, row, number, priceTierId, unitPrice]
+      additionalProperties: false
+
+    ProvisionInventoryRequest:
+      type: object
+      description: >-
+        When the organiser requests publication, Catalogue locks the session
+        configuration and sends it to Inventory & Orders to prepare the inventory.
+        The sales opening time must be earlier than the closing time.
+        Sales may close before or at the session start time.
+        The seats list must contain one entry per seat in the selected seating plan.
+        Each entry must include a unique seat ID and one unit price in EUR.
+        Each seat identifier must appear once and have one configured price in EUR.
+      properties:
+        configurationVersion: { type: integer, minimum: 1 }
+        eventId: { type: string, minLength: 1 }
+        organiserId: { type: string, minLength: 1 }
+        venueId: { type: string, minLength: 1 }
+        planId: { type: string, minLength: 1 }
+        salesOpenAt: { type: string, format: date-time }
+        salesCloseAt: { type: string, format: date-time }
+        startsAt: { type: string, format: date-time }
+        seats:
+          type: array
+          minItems: 1
+          items: { $ref: "#/components/schemas/InventorySeat" }
+      required: [configurationVersion, eventId, organiserId, venueId, planId,
+                 salesOpenAt, salesCloseAt, startsAt, seats]
+      additionalProperties: false
+
+    InventoryConfiguration:
+      type: object
+      description: Confirms that the inventory is ready for the specified session configuration.
+      properties:
+        sessionId: { type: string, minLength: 1 }
+        configurationVersion: { type: integer, minimum: 1 }
+        state: { type: string, const: READY }
+      required: [sessionId, configurationVersion, state]
+
+    OrderPage:
+      type: object
+      description: A page of orders belonging to the authenticated customer.
+      properties:
+        items: { type: array, items: { $ref: "#/components/schemas/Order" } }
+        nextCursor: { type: [string, "null"], description: Opaque cursor. Null on the last page. }
+        limit: { type: integer, minimum: 1, maximum: 100 }
+      required: [items, nextCursor, limit]
+
+    SalesSummary:
+      type: object
+      description: >-
+        Counts of FREE, HELD, and SOLD seats and gross sales for a session,
+        calculated from its inventory and orders at the time indicated by asOf.
+      properties:
+        sessionId: { type: string, minLength: 1 }
+        freeSeats: { type: integer, minimum: 0 }
+        heldSeats: { type: integer, minimum: 0 }
+        soldSeats: { type: integer, minimum: 0 }
+        grossSales: { $ref: "#/components/schemas/Money" }
+        asOf: { type: string, format: date-time }
+      required: [sessionId, freeSeats, heldSeats, soldSeats, grossSales, asOf]
+
+    TicketOrderContext:
+      type: object
+      description: >-
+        Order details returned to Ticketing after verifying customer ownership.
+        The expected ticket count is the number of items in the order.
+      properties:
+        orderId: { type: string, minLength: 1 }
+        customerId: { type: string, minLength: 1 }
+        sessionId: { type: string, minLength: 1 }
+        state:
+          type: string
+          enum: [PENDING_PAYMENT, PAID, PAYMENT_FAILED, CANCELLATION_PENDING,
+                 CANCELLED, REFUND_PENDING, REFUNDED, REFUND_FAILED]
+        expectedTicketCount: { type: integer, minimum: 1, maximum: 10 }
+      required: [orderId, customerId, sessionId, state, expectedTicketCount]
+
+  responses:
+    MalformedRequest:
+      description: The request cannot be read, a header is malformed or the API version is unsupported.
+      content:
+        application/problem+json:
+          schema: { $ref: "#/components/schemas/Problem" }
+
+    Unauthorized:
+      description: A supplied token is invalid, or a protected operation has no valid token.
+      content:
+        application/problem+json:
+          schema: { $ref: "#/components/schemas/Problem" }
+
+    Forbidden:
+      description: The authenticated caller lacks the required role or ownership.
+      content:
+        application/problem+json:
+          schema: { $ref: "#/components/schemas/Problem" }
+
+    NotFound:
+      description: The resource does not exist or is not visible to the caller.
+      content:
+        application/problem+json:
+          schema: { $ref: "#/components/schemas/Problem" }
+
+    Conflict:
+      description: The operation conflicts with current resource state, or the same idempotency key is being processed.
+      content:
+        application/problem+json:
+          schema: { $ref: "#/components/schemas/Problem" }
+
+    SalesClosed:
+      description: The session sales window is closed.
+      content:
+        application/problem+json:
+          schema: { $ref: "#/components/schemas/Problem" }
+
+    PreconditionFailed:
+      description: If-Match does not match the current resource version.
+      content:
+        application/problem+json:
+          schema: { $ref: "#/components/schemas/Problem" }
+
+    ContentTooLarge:
+      description: The inventory setup request body exceeds the supported size.
+      content:
+        application/problem+json:
+          schema: { $ref: "#/components/schemas/Problem" }
+
+    UnsupportedMediaType:
+      description: The body is not sent as application/json.
+      content:
+        application/problem+json:
+          schema: { $ref: "#/components/schemas/Problem" }
+
+    ValidationFailed:
+      description: Request values or references are invalid, or an idempotency key was reused with different data.
+      content:
+        application/problem+json:
+          schema: { $ref: "#/components/schemas/Problem" }
+
+    PreconditionRequired:
+      description: The required If-Match header is absent.
+      content:
+        application/problem+json:
+          schema: { $ref: "#/components/schemas/Problem" }
+
+    UnexpectedError:
+      description: Other errors use the same Problem format.
+      content:
+        application/problem+json:
+          schema: { $ref: "#/components/schemas/Problem" }
+
