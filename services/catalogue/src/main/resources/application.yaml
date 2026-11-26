@@ -16,6 +16,13 @@ spring:
       maximum-pool-size: ${CATALOGUE_DB_MAX_POOL_SIZE:10}
       connection-timeout: ${CATALOGUE_DB_CONN_TIMEOUT_MS:5000}
 
+  jpa:
+    # The persistence context must not outlive the service transaction (L17)
+    open-in-view: false
+    hibernate:
+      # Flyway owns the schema; Hibernate only checks the mappings at boot (L20)
+      ddl-auto: validate
+
   sql:
     init:
       mode: never
@@ -25,7 +32,43 @@ spring:
     locations: classpath:db/migration
     baseline-on-migrate: false
 
+  mvc:
+    # Framework failures are emitted as RFC 9457 problem documents too (L13)
+    problemdetails:
+      enabled: true
+
   jackson:
     deserialization:
       fail-on-unknown-properties: true
       fail-on-null-for-primitives: true
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health, info, metrics
+  endpoint:
+    health:
+      probes:
+        enabled: true
+      show-details: when_authorized
+
+logging:
+  pattern:
+    # Correlation id (X-Request-Id, or the outbox id for background work) on every log line
+    level: "%5p [%X{requestId:-}]"
+
+catalogue:
+  inventory-orders:
+    base-url: ${INVENTORY_ORDERS_BASE_URL:http://localhost:8082}
+    connect-timeout: ${INVENTORY_ORDERS_CONNECT_TIMEOUT_MS:2000}
+    read-timeout: ${INVENTORY_ORDERS_READ_TIMEOUT_MS:5000}
+  provisioning-worker:
+    fixed-delay-ms: ${CATALOGUE_PROVISIONING_POLL_MS:1000}
+    max-attempts: ${CATALOGUE_PROVISIONING_MAX_ATTEMPTS:5}
+    # Lease of a claimed task; must exceed the Inventory & Orders connect + read timeouts
+    lease: ${CATALOGUE_PROVISIONING_LEASE_MS:30000}
+    max-backoff: ${CATALOGUE_PROVISIONING_MAX_BACKOFF_MS:60000}
+  idempotency:
+    retention: ${CATALOGUE_IDEMPOTENCY_RETENTION:PT24H}
+    purge-fixed-delay-ms: ${CATALOGUE_IDEMPOTENCY_PURGE_MS:3600000}
