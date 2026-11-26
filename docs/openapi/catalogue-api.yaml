@@ -641,7 +641,7 @@ paths:
         and a timeout. Each retry uses the same configuration version.
         The client can check the session status using GET /sessions/{sessionId}.
         The status is PROVISIONING while setup is in progress, READY once
-        Inventory & Orders confirms completion, or PROVISIONING_FAILED if setup
+        Inventory & Orders confirms completion, or FAILED if setup
         fails. Customers can reserve seats only when the session is READY
         and the sales window is open.
       parameters:
@@ -965,7 +965,7 @@ components:
           items: { $ref: "#/components/schemas/SeatPriceAssignment" }
         timeZone: { type: string }
         startsLocal: { type: string }
-        state: { type: string, enum: [DRAFT, PROVISIONING, READY, PROVISIONING_FAILED, CANCELLED] }
+        state: { type: string, enum: [DRAFT, PROVISIONING, READY, FAILED, CANCELLED] }
         version: { type: integer, minimum: 1 }
       required: [sessionId, eventId, organiserId, venueId, planId, startsAt,
                  salesOpenAt, salesCloseAt, priceTiers, seatPrices,

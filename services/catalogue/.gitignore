@@ -2,6 +2,8 @@
 .gradle/
 build/
 out/
+bin/
+bin
 
 # Keep the wrapper jar even if a global ignore excludes jars
 !gradle/wrapper/gradle-wrapper.jar
