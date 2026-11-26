@@ -1,12 +1,12 @@
-package it.polito.wa2.catalogue.persistence.sessions
+package it.polito.wa2.catalogue.adapters.outbound.persistence.sessions
 
-import it.polito.wa2.catalogue.entities.sessions.EventId
-import it.polito.wa2.catalogue.entities.sessions.OrganiserId
-import it.polito.wa2.catalogue.entities.sessions.PlanId
-import it.polito.wa2.catalogue.entities.sessions.Session
-import it.polito.wa2.catalogue.entities.sessions.SessionId
-import it.polito.wa2.catalogue.entities.sessions.SessionStatus
-import it.polito.wa2.catalogue.entities.sessions.VenueId
+import it.polito.wa2.catalogue.domain.sessions.EventId
+import it.polito.wa2.catalogue.domain.sessions.OrganiserId
+import it.polito.wa2.catalogue.domain.sessions.PlanId
+import it.polito.wa2.catalogue.domain.sessions.Session
+import it.polito.wa2.catalogue.domain.sessions.SessionId
+import it.polito.wa2.catalogue.domain.sessions.SessionStatus
+import it.polito.wa2.catalogue.domain.sessions.VenueId
 import jakarta.persistence.CascadeType
 import jakarta.persistence.Column
 import jakarta.persistence.Entity
@@ -69,10 +69,10 @@ class SessionEntity(
     var version: Long = 1,
 
     @Column(name = "created_at", nullable = false, updatable = false)
-    val createdAt: Instant = Instant.now(),
+    val createdAt: Instant,
 
     @Column(name = "updated_at", nullable = false)
-    var updatedAt: Instant = Instant.now(),
+    var updatedAt: Instant,
 
     @OneToMany(
         mappedBy = "session",

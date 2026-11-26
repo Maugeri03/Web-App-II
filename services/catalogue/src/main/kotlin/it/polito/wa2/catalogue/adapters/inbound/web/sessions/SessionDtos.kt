@@ -1,9 +1,9 @@
-package it.polito.wa2.catalogue.api.sessions
+package it.polito.wa2.catalogue.adapters.inbound.web.sessions
 
-import it.polito.wa2.catalogue.entities.sessions.Money
-import it.polito.wa2.catalogue.entities.sessions.PriceTier
-import it.polito.wa2.catalogue.entities.sessions.SeatPrice
-import it.polito.wa2.catalogue.entities.sessions.Session
+import it.polito.wa2.catalogue.domain.sessions.Money
+import it.polito.wa2.catalogue.domain.sessions.PriceTier
+import it.polito.wa2.catalogue.domain.sessions.SeatPrice
+import it.polito.wa2.catalogue.domain.sessions.Session
 import java.time.Instant
 
 /**

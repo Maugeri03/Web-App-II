@@ -1,9 +1,9 @@
 package it.polito.wa2.catalogue.application.sessions
 
-import it.polito.wa2.catalogue.entities.sessions.Session
-import it.polito.wa2.catalogue.entities.sessions.SessionId
-import it.polito.wa2.catalogue.exceptions.SessionNotFoundException
-import it.polito.wa2.catalogue.entities.sessions.SessionPort
+import it.polito.wa2.catalogue.domain.sessions.Session
+import it.polito.wa2.catalogue.domain.sessions.SessionId
+import it.polito.wa2.catalogue.domain.sessions.SessionNotFoundException
+import it.polito.wa2.catalogue.application.ports.outbound.SessionPort
 import org.springframework.stereotype.Service
 import org.springframework.transaction.annotation.Transactional
 

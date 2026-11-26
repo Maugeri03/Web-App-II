@@ -1,6 +1,6 @@
-package it.polito.wa2.catalogue.persistence.sessions
+package it.polito.wa2.catalogue.adapters.outbound.persistence.sessions
 
-import it.polito.wa2.catalogue.entities.sessions.SeatPrice
+import it.polito.wa2.catalogue.domain.sessions.SeatPrice
 import jakarta.persistence.Column
 import jakarta.persistence.Entity
 import jakarta.persistence.FetchType

@@ -1,4 +1,4 @@
-package it.polito.wa2.catalogue.persistence.sessions
+package it.polito.wa2.catalogue.adapters.outbound.persistence.sessions
 
 import org.springframework.data.jpa.repository.JpaRepository
 import org.springframework.data.jpa.repository.Query
