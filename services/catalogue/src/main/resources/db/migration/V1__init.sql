@@ -1,5 +1,6 @@
 -- V1__init.sql
--- Initial catalogue schema: venues, seating plans, events, sessions, and pricing
+-- Initial catalogue schema: venues, seating plans, events, sessions, pricing,
+-- idempotency records and the session provisioning outbox
 
 CREATE TABLE venues (
     venue_id     TEXT PRIMARY KEY,
@@ -100,3 +101,36 @@ CREATE TABLE session_seat_prices (
         FOREIGN KEY (plan_id, seat_id)
         REFERENCES plan_seats (plan_id, seat_id)
 );
+
+-- Idempotency records for mutating POST endpoints: keys are scoped to caller and operation,
+-- retained for 24 hours (purged by the application), and store the serialised command result
+CREATE TABLE idempotency_records (
+    caller_id         TEXT NOT NULL,
+    endpoint          TEXT NOT NULL,
+    idempotency_key   TEXT NOT NULL,
+    request_hash      TEXT NOT NULL,
+    response_body     TEXT NOT NULL,
+    created_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (caller_id, endpoint, idempotency_key)
+);
+
+-- Supports the periodic deletion of expired records
+CREATE INDEX idx_idempotency_records_created_at
+    ON idempotency_records (created_at);
+
+-- Transactional outbox driving asynchronous inventory provisioning for published sessions.
+-- While a task is IN_PROGRESS, next_attempt_at is the expiry of the worker lease.
+CREATE TABLE session_provisioning_outbox (
+    outbox_id         TEXT PRIMARY KEY,
+    session_id        TEXT NOT NULL UNIQUE REFERENCES sessions (session_id) ON DELETE CASCADE,
+    status            TEXT NOT NULL CHECK (status IN ('PENDING', 'IN_PROGRESS', 'COMPLETED', 'FAILED')),
+    attempt_count     INTEGER NOT NULL DEFAULT 0 CHECK (attempt_count >= 0),
+    next_attempt_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+    last_error        TEXT NULL,
+    created_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at        TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- Supports efficient worker polling for due tasks
+CREATE INDEX idx_outbox_status_next_attempt
+    ON session_provisioning_outbox (status, next_attempt_at);
