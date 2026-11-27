@@ -4,13 +4,13 @@ import it.polito.wa2.catalogue.application.exceptions.IdempotencyKeyInProgressEx
 import it.polito.wa2.catalogue.application.exceptions.IdempotencyKeyReusedException
 import it.polito.wa2.catalogue.application.ports.outbound.IdempotencyPort
 import it.polito.wa2.catalogue.application.ports.outbound.IdempotencyScope
-import it.polito.wa2.catalogue.domain.sessions.Session
 import jakarta.persistence.EntityManager
 import jakarta.persistence.PersistenceException
 import org.springframework.stereotype.Repository
 import tools.jackson.databind.ObjectMapper
 import java.time.Clock
 import java.time.Instant
+import kotlin.reflect.KClass
 
 /**
  * JPA-backed implementation of [IdempotencyPort] backed by `idempotency_records`.
@@ -24,17 +24,22 @@ class JpaIdempotencyRepositoryAdapter(
     private val clock: Clock
 ) : IdempotencyPort {
 
-    override fun findResult(scope: IdempotencyScope, requestHash: String, notBefore: Instant): Session? {
+    override fun <T : Any> findResult(
+        scope: IdempotencyScope,
+        requestHash: String,
+        notBefore: Instant,
+        resultType: KClass<T>
+    ): T? {
         val existing = idempotencyRepository.findById(scope.toRecordId()).orElse(null)
             ?.takeIf { !it.createdAt.isBefore(notBefore) }
             ?: return null
         if (existing.requestHash != requestHash) {
             throw IdempotencyKeyReusedException(scope.idempotencyKey)
         }
-        return objectMapper.readValue(existing.responseBody, SessionSnapshot::class.java).toDomain()
+        return ResultSnapshots.fromJson(objectMapper, existing.responseBody, resultType)
     }
 
-    override fun saveResult(scope: IdempotencyScope, requestHash: String, result: Session, notBefore: Instant) {
+    override fun saveResult(scope: IdempotencyScope, requestHash: String, result: Any, notBefore: Instant) {
         val recordId = scope.toRecordId()
         // An expired record with the same key must make room for the new one
         idempotencyRepository.findById(recordId).orElse(null)
@@ -49,7 +54,7 @@ class JpaIdempotencyRepositoryAdapter(
                 IdempotencyRecordEntity(
                     id = recordId,
                     requestHash = requestHash,
-                    responseBody = objectMapper.writeValueAsString(SessionSnapshot.of(result)),
+                    responseBody = ResultSnapshots.toJson(objectMapper, result),
                     createdAt = clock.instant()
                 )
             )

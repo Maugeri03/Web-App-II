@@ -1,11 +1,15 @@
 package it.polito.wa2.catalogue.domain.sessions
 
+import it.polito.wa2.catalogue.domain.common.DomainValidationException
+import it.polito.wa2.catalogue.domain.common.ResourceConflictException
+import it.polito.wa2.catalogue.domain.common.ResourceNotFoundException
+
 /**
  * Thrown when a requested session cannot be found in the repository.
  */
 class SessionNotFoundException(
     sessionId: SessionId
-) : RuntimeException("Session with id '${sessionId.value}' was not found")
+) : ResourceNotFoundException("Session", sessionId.value)
 
 /**
  * Thrown when a state transition is not permitted from the current session status.
@@ -19,16 +23,19 @@ class InvalidSessionStateTransitionException(
 )
 
 /**
+ * Thrown when the configuration of a session that is no longer a `DRAFT` is modified (HTTP 409):
+ * published configuration is immutable.
+ */
+class SessionNotEditableException(
+    sessionId: SessionId,
+    currentStatus: SessionStatus
+) : ResourceConflictException(
+    "Session '${sessionId.value}' is $currentStatus: only DRAFT sessions can be modified"
+)
+
+/**
  * Thrown when domain validation rules fail before creating or publishing a session.
  */
 class SessionValidationException(
-    override val message: String
-) : RuntimeException(message)
-
-/**
- * Thrown when the expected session version (e.g. from `If-Match`) does not match the current one,
- * or when a concurrent update wins the optimistic lock.
- */
-class ConcurrentModificationException(
     message: String
-) : RuntimeException(message)
+) : DomainValidationException(message)

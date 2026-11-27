@@ -1,9 +1,15 @@
 package it.polito.wa2.catalogue.adapters.inbound.web.sessions
 
+import it.polito.wa2.catalogue.adapters.inbound.web.common.parseField
+import it.polito.wa2.catalogue.adapters.inbound.web.common.parseInstant
+import it.polito.wa2.catalogue.adapters.inbound.web.common.parseOffsetDateTime
 import it.polito.wa2.catalogue.domain.sessions.Money
+import it.polito.wa2.catalogue.domain.sessions.PlanId
 import it.polito.wa2.catalogue.domain.sessions.PriceTier
 import it.polito.wa2.catalogue.domain.sessions.SeatPrice
 import it.polito.wa2.catalogue.domain.sessions.Session
+import it.polito.wa2.catalogue.domain.sessions.SessionConfiguration
+import it.polito.wa2.catalogue.domain.sessions.VenueId
 import java.time.Instant
 
 /**
@@ -101,3 +107,52 @@ fun Session.toDto(): SessionResponseDto =
         seatPrices = seatPrices.map { it.toDto() },
         version = version
     )
+
+/** Money in a request body (`Money`). */
+data class MoneyRequestDto(
+    val amount: String,
+    val currency: String
+)
+
+/** Price tier in a request body (`PriceTier`). */
+data class PriceTierRequestDto(
+    val priceTierId: String,
+    val name: String,
+    val price: MoneyRequestDto
+)
+
+/** Seat-to-tier assignment in a request body (`SeatPriceAssignment`). */
+data class SeatPriceRequestDto(
+    val seatId: String,
+    val priceTierId: String
+)
+
+/**
+ * Request body of `POST /events/{eventId}/sessions` and `PUT /sessions/{sessionId}` (`SessionWriteRequest`).
+ * Timestamps are read as text so that the offset of `startsAt`, which must match the venue time zone,
+ * reaches the domain exactly as the client sent it.
+ */
+data class SessionWriteRequestDto(
+    val venueId: String,
+    val planId: String,
+    val startsAt: String,
+    val endsAt: String? = null,
+    val salesOpenAt: String,
+    val salesCloseAt: String,
+    val priceTiers: List<PriceTierRequestDto>,
+    val seatPrices: List<SeatPriceRequestDto>
+) {
+    fun toDomain(): SessionConfiguration =
+        SessionConfiguration(
+            venueId = parseField("venueId") { VenueId(venueId) },
+            planId = parseField("planId") { PlanId(planId) },
+            startsAt = parseOffsetDateTime("startsAt", startsAt),
+            endsAt = endsAt?.let { parseOffsetDateTime("endsAt", it) },
+            salesOpenAt = parseInstant("salesOpenAt", salesOpenAt),
+            salesCloseAt = parseInstant("salesCloseAt", salesCloseAt),
+            priceTiers = priceTiers.map {
+                PriceTier(it.priceTierId, it.name, Money.parseEur(it.price.amount, it.price.currency))
+            },
+            seatPrices = seatPrices.map { SeatPrice(it.seatId, it.priceTierId) }
+        )
+}

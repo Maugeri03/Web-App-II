@@ -1,34 +1,23 @@
 package it.polito.wa2.catalogue.application.sessions
 
 import it.polito.wa2.catalogue.application.exceptions.IdempotencyKeyInProgressException
-import it.polito.wa2.catalogue.application.exceptions.MissingOrInvalidIdempotencyKeyException
 import it.polito.wa2.catalogue.application.idempotency.IdempotencyRetentionService
+import it.polito.wa2.catalogue.application.idempotency.IdempotentCommandRunner
+import it.polito.wa2.catalogue.application.idempotency.IdempotentResult
 import it.polito.wa2.catalogue.application.ports.outbound.EventPort
 import it.polito.wa2.catalogue.application.ports.outbound.IdempotencyPort
-import it.polito.wa2.catalogue.application.ports.outbound.IdempotencyScope
 import it.polito.wa2.catalogue.application.ports.outbound.ProvisioningOutboxPort
 import it.polito.wa2.catalogue.application.ports.outbound.SeatingPlanPort
 import it.polito.wa2.catalogue.application.ports.outbound.SessionPort
+import it.polito.wa2.catalogue.domain.common.ConcurrentModificationException
 import it.polito.wa2.catalogue.domain.events.EventNotPublishedException
 import it.polito.wa2.catalogue.domain.events.EventPublicationState
-import it.polito.wa2.catalogue.domain.sessions.ConcurrentModificationException
 import it.polito.wa2.catalogue.domain.sessions.Session
 import it.polito.wa2.catalogue.domain.sessions.SessionId
 import it.polito.wa2.catalogue.domain.sessions.SessionNotFoundException
 import it.polito.wa2.catalogue.domain.sessions.SessionValidationException
 import org.springframework.stereotype.Service
 import org.springframework.transaction.annotation.Transactional
-import java.security.MessageDigest
-import java.util.UUID
-
-/**
- * Outcome of a session publication: the session in `PROVISIONING`, and whether it was replayed from a
- * previous execution with the same Idempotency-Key instead of being executed now.
- */
-data class PublicationResult(
-    val session: Session,
-    val replayed: Boolean
-)
 
 /**
  * Application service orchestrating idempotent session publication (`DRAFT -> PROVISIONING`)
@@ -41,7 +30,8 @@ class SessionPublicationService(
     private val seatingPlanPort: SeatingPlanPort,
     private val outboxPort: ProvisioningOutboxPort,
     private val idempotencyPort: IdempotencyPort,
-    private val idempotencyRetention: IdempotencyRetentionService
+    private val idempotencyRetention: IdempotencyRetentionService,
+    private val idempotentCommands: IdempotentCommandRunner
 ) {
 
     /**
@@ -58,17 +48,18 @@ class SessionPublicationService(
         sessionId: SessionId,
         rawIdempotencyKey: String?,
         expectedVersion: Long
-    ): PublicationResult {
-        val scope = IdempotencyScope(
+    ): IdempotentResult<Session> {
+        val scope = idempotentCommands.scope(
             callerId = callerId,
             operation = "POST:/sessions/${sessionId.value}/publication",
-            idempotencyKey = validateUuidKey(rawIdempotencyKey)
+            rawKey = rawIdempotencyKey
         )
-        val requestHash = sha256("publish:${sessionId.value}")
+        val requestHash = idempotentCommands.fingerprint("publish", sessionId.value)
         val validSince = idempotencyRetention.validSince()
 
-        idempotencyPort.findResult(scope, requestHash, validSince)?.let { previous ->
-            return PublicationResult(session = previous, replayed = true)
+        // A completed identical request is replayed before the If-Match check, as the contract requires
+        idempotencyPort.findResult(scope, requestHash, validSince, Session::class)?.let { previous ->
+            return IdempotentResult(previous, replayed = true)
         }
 
         val current = sessionPort.findById(sessionId)
@@ -86,14 +77,14 @@ class SessionPublicationService(
         } catch (ex: ConcurrentModificationException) {
             // A concurrent request won the race: if it carried the same key, report it as in progress
             // rather than as a stale If-Match. A different payload under the same key is still rejected as reused.
-            if (idempotencyPort.findResult(scope, requestHash, validSince) != null) {
+            if (idempotencyPort.findResult(scope, requestHash, validSince, Session::class) != null) {
                 throw IdempotencyKeyInProgressException(scope.idempotencyKey)
             }
             throw ex
         }
         outboxPort.enqueuePending(sessionId)
         idempotencyPort.saveResult(scope, requestHash, savedSession, validSince)
-        return PublicationResult(session = savedSession, replayed = false)
+        return IdempotentResult(savedSession, replayed = false)
     }
 
     /**
@@ -117,23 +108,5 @@ class SessionPublicationService(
                 "Session '$id' must assign a price to every seat of plan '${session.planId.value}' and to no other seat"
             )
         }
-    }
-
-    /** Ensures the `Idempotency-Key` is present and formatted as a UUID. */
-    private fun validateUuidKey(rawKey: String?): String {
-        if (rawKey.isNullOrBlank()) {
-            throw MissingOrInvalidIdempotencyKeyException("Header 'Idempotency-Key' is required")
-        }
-        return try {
-            UUID.fromString(rawKey.trim()).toString()
-        } catch (_: IllegalArgumentException) {
-            throw MissingOrInvalidIdempotencyKeyException("Header 'Idempotency-Key' must be a valid UUID")
-        }
-    }
-
-    /** Computes a lowercase hexadecimal SHA-256 digest of [input]. */
-    private fun sha256(input: String): String {
-        val digest = MessageDigest.getInstance("SHA-256").digest(input.toByteArray(Charsets.UTF_8))
-        return digest.joinToString("") { "%02x".format(it) }
     }
 }

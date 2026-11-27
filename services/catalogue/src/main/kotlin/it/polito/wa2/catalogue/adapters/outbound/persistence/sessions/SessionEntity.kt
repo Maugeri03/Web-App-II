@@ -7,7 +7,6 @@ import it.polito.wa2.catalogue.domain.sessions.Session
 import it.polito.wa2.catalogue.domain.sessions.SessionId
 import it.polito.wa2.catalogue.domain.sessions.SessionStatus
 import it.polito.wa2.catalogue.domain.sessions.VenueId
-import jakarta.persistence.CascadeType
 import jakarta.persistence.Column
 import jakarta.persistence.Entity
 import jakarta.persistence.EnumType
@@ -22,6 +21,8 @@ import java.time.Instant
 
 /**
  * JPA entity mapped to the `sessions` table.
+ * The price tier and seat price collections are read-only views: rows are written explicitly by
+ * [JpaSessionRepositoryAdapter], which replaces them as a whole when the pricing changes.
  */
 @Entity
 @Table(name = "sessions")
@@ -37,32 +38,32 @@ class SessionEntity(
     val organiserId: String,
 
     @Column(name = "venue_id", nullable = false)
-    val venueId: String,
+    var venueId: String,
 
     @Column(name = "plan_id", nullable = false)
-    val planId: String,
+    var planId: String,
 
     @Enumerated(EnumType.STRING)
     @Column(name = "state", nullable = false)
     var state: SessionStatus,
 
     @Column(name = "starts_at", nullable = false)
-    val startsAt: Instant,
+    var startsAt: Instant,
 
     @Column(name = "ends_at", nullable = true)
-    val endsAt: Instant?,
+    var endsAt: Instant?,
 
     @Column(name = "time_zone", nullable = false)
-    val timeZone: String,
+    var timeZone: String,
 
     @Column(name = "starts_local", nullable = false)
-    val startsLocal: String,
+    var startsLocal: String,
 
     @Column(name = "sales_open_at", nullable = false)
-    val salesOpenAt: Instant,
+    var salesOpenAt: Instant,
 
     @Column(name = "sales_close_at", nullable = false)
-    val salesCloseAt: Instant,
+    var salesCloseAt: Instant,
 
     @Version
     @Column(name = "version", nullable = false)
@@ -74,21 +75,11 @@ class SessionEntity(
     @Column(name = "updated_at", nullable = false)
     var updatedAt: Instant,
 
-    @OneToMany(
-        mappedBy = "session",
-        cascade = [CascadeType.ALL],
-        orphanRemoval = true,
-        fetch = FetchType.LAZY
-    )
+    @OneToMany(mappedBy = "session", fetch = FetchType.LAZY)
     @OrderBy("priceTierId ASC")
     val priceTiers: MutableList<SessionPriceTierEntity> = mutableListOf(),
 
-    @OneToMany(
-        mappedBy = "session",
-        cascade = [CascadeType.ALL],
-        orphanRemoval = true,
-        fetch = FetchType.LAZY
-    )
+    @OneToMany(mappedBy = "session", fetch = FetchType.LAZY)
     @OrderBy("seatId ASC")
     val seatPrices: MutableList<SessionSeatPriceEntity> = mutableListOf()
 ) {

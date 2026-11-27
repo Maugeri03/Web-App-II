@@ -1,5 +1,7 @@
 package it.polito.wa2.catalogue.domain.sessions
 
+import it.polito.wa2.catalogue.domain.common.validate
+
 /** Physical seat of a seating plan, identified by its location inside the venue. */
 data class PlanSeat(
     val seatId: String,
@@ -8,6 +10,9 @@ data class PlanSeat(
     val number: String
 ) {
     init {
-        require(seatId.isNotBlank()) { "seatId must not be blank" }
+        validate(seatId.isNotBlank()) { "seatId must not be blank" }
+        validate(sector.isNotBlank()) { "Seat '$seatId' must have a non-blank sector" }
+        validate(row.isNotBlank()) { "Seat '$seatId' must have a non-blank row" }
+        validate(number.isNotBlank()) { "Seat '$seatId' must have a non-blank number" }
     }
 }

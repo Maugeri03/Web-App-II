@@ -4,10 +4,11 @@ import it.polito.wa2.catalogue.application.exceptions.IdempotencyKeyInProgressEx
 import it.polito.wa2.catalogue.application.exceptions.IdempotencyKeyReusedException
 import it.polito.wa2.catalogue.application.exceptions.MissingOrInvalidIdempotencyKeyException
 import it.polito.wa2.catalogue.domain.events.EventNotPublishedException
-import it.polito.wa2.catalogue.domain.sessions.ConcurrentModificationException
+import it.polito.wa2.catalogue.domain.common.ConcurrentModificationException
+import it.polito.wa2.catalogue.domain.common.DomainValidationException
+import it.polito.wa2.catalogue.domain.common.ResourceConflictException
+import it.polito.wa2.catalogue.domain.common.ResourceNotFoundException
 import it.polito.wa2.catalogue.domain.sessions.InvalidSessionStateTransitionException
-import it.polito.wa2.catalogue.domain.sessions.SessionNotFoundException
-import it.polito.wa2.catalogue.domain.sessions.SessionValidationException
 import jakarta.servlet.http.HttpServletRequest
 import org.slf4j.LoggerFactory
 import org.slf4j.event.Level
@@ -45,9 +46,16 @@ class ProblemDetailsHandler : ResponseEntityExceptionHandler() {
 
     // ---- client-owned failures -------------------------------------------------------------
 
-    @ExceptionHandler(SessionNotFoundException::class)
-    fun sessionNotFound(ex: SessionNotFoundException, request: HttpServletRequest) =
-        problem(SESSION_NOT_FOUND, ex, request)
+    /** One problem class per resource: `session-not-found`, `venue-not-found`, `seating-plan-not-found`, ... */
+    @ExceptionHandler(ResourceNotFoundException::class)
+    fun resourceNotFound(ex: ResourceNotFoundException, request: HttpServletRequest): ResponseEntity<ProblemDetail> {
+        val slug = ex.resource.trim().lowercase().replace(' ', '-')
+        val problemClass = ProblemClass(
+            HttpStatus.NOT_FOUND, "$slug-not-found", "${ex.resource} not found",
+            "${slug.replace('-', '_')}_not_found", Level.DEBUG
+        )
+        return problem(problemClass, ex, request)
+    }
 
     @ExceptionHandler(UnsupportedApiVersionException::class)
     fun unsupportedVersion(ex: UnsupportedApiVersionException, request: HttpServletRequest) =
@@ -61,8 +69,12 @@ class ProblemDetailsHandler : ResponseEntityExceptionHandler() {
     fun invalidParameter(ex: InvalidRequestParameterException, request: HttpServletRequest) =
         problem(INVALID_PARAMETER, ex, request)
 
-    @ExceptionHandler(SessionValidationException::class)
-    fun validationFailed(ex: SessionValidationException, request: HttpServletRequest) =
+    @ExceptionHandler(DomainValidationException::class)
+    fun validationFailed(ex: DomainValidationException, request: HttpServletRequest) =
+        problem(VALIDATION_FAILED, ex, request)
+
+    @ExceptionHandler(InvalidRequestFieldException::class)
+    fun invalidField(ex: InvalidRequestFieldException, request: HttpServletRequest) =
         problem(VALIDATION_FAILED, ex, request)
 
     @ExceptionHandler(IdempotencyKeyReusedException::class)
@@ -78,6 +90,10 @@ class ProblemDetailsHandler : ResponseEntityExceptionHandler() {
     @ExceptionHandler(InvalidSessionStateTransitionException::class)
     fun invalidTransition(ex: InvalidSessionStateTransitionException, request: HttpServletRequest) =
         problem(INVALID_STATE_TRANSITION, ex, request)
+
+    @ExceptionHandler(ResourceConflictException::class)
+    fun conflict(ex: ResourceConflictException, request: HttpServletRequest) =
+        problem(CONFLICT, ex, request)
 
     @ExceptionHandler(EventNotPublishedException::class)
     fun eventNotPublished(ex: EventNotPublishedException, request: HttpServletRequest) =
@@ -152,7 +168,6 @@ class ProblemDetailsHandler : ResponseEntityExceptionHandler() {
         const val PROBLEM_BASE_URI = "https://api.example.com/problems"
         const val CODE = "code"
 
-        val SESSION_NOT_FOUND = ProblemClass(HttpStatus.NOT_FOUND, "session-not-found", "Session not found", "session_not_found", Level.DEBUG)
         val UNSUPPORTED_API_VERSION = ProblemClass(HttpStatus.BAD_REQUEST, "unsupported-api-version", "Unsupported API version", "unsupported_api_version", Level.DEBUG)
         val INVALID_IDEMPOTENCY_KEY = ProblemClass(HttpStatus.BAD_REQUEST, "invalid-idempotency-key", "Invalid Idempotency-Key", "invalid_idempotency_key", Level.DEBUG)
         val INVALID_PARAMETER = ProblemClass(HttpStatus.BAD_REQUEST, "invalid-parameter", "Invalid request parameter", "invalid_parameter", Level.DEBUG)
@@ -160,6 +175,7 @@ class ProblemDetailsHandler : ResponseEntityExceptionHandler() {
         val IDEMPOTENCY_KEY_REUSED = ProblemClass(HttpStatus.UNPROCESSABLE_ENTITY, "idempotency-key-reused", "Idempotency-Key reused", "idempotency_key_reused", Level.DEBUG)
         val PRECONDITION_REQUIRED = ProblemClass(HttpStatus.PRECONDITION_REQUIRED, "precondition-required", "Precondition required", "precondition_required", Level.DEBUG)
         val INVALID_STATE_TRANSITION = ProblemClass(HttpStatus.CONFLICT, "invalid-state-transition", "Invalid session state transition", "invalid_state_transition", Level.INFO)
+        val CONFLICT = ProblemClass(HttpStatus.CONFLICT, "conflict", "Conflict with the current state", "conflict", Level.INFO)
         val EVENT_NOT_PUBLISHED = ProblemClass(HttpStatus.CONFLICT, "event-not-published", "Event not published", "event_not_published", Level.INFO)
         val IDEMPOTENCY_KEY_IN_PROGRESS = ProblemClass(HttpStatus.CONFLICT, "idempotency-key-in-progress", "Request in progress", "idempotency_key_in_progress", Level.INFO)
         val PRECONDITION_FAILED = ProblemClass(HttpStatus.PRECONDITION_FAILED, "precondition-failed", "Precondition failed", "precondition_failed", Level.INFO)
