@@ -1,0 +1,437 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Tickets</title>
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<header>
+  <div class="bar">
+    <a class="brand" href="#/">Tickets</a>
+    <nav>
+      <a href="#/" class="active">Events</a>
+    </nav>
+  </div>
+</header>
+<main id="app"></main>
+
+<script>
+/*
+ * Service endpoints. In production both are reached through the same origin (an API gateway),
+ * so these become relative paths such as "/api/catalogue".
+ */
+const CONFIG = {
+  catalogue: "http://localhost:8081",
+  inventory: "http://localhost:8082",
+};
+
+/** Access token of the signed-in user (Keycloak). Not wired yet: requests go out unauthenticated. */
+function accessToken() { return null; }
+
+const app = document.getElementById("app");
+const store = { holdTimer: null, pollTimer: null, pendingKeys: {} };
+
+// ---- API -------------------------------------------------------------------------------------
+
+class ApiError extends Error {
+  constructor(status, problem) {
+    super(problem?.detail || `Request failed (${status})`);
+    this.status = status;
+    this.code = problem?.code;
+  }
+}
+
+/** Keeps one Idempotency-Key per action until the server answers, so a retry after a network error is safe. */
+function idempotencyKey(action) { return store.pendingKeys[action] ??= crypto.randomUUID(); }
+
+async function api(service, method, path, { body, headers = {}, action } = {}) {
+  const h = { "X-API-Version": "1.0", Accept: "application/json", ...headers };
+  if (body !== undefined) h["Content-Type"] = "application/json";
+  if (action) h["Idempotency-Key"] = idempotencyKey(action);
+  const token = accessToken();
+  if (token) h.Authorization = `Bearer ${token}`;
+
+  let res;
+  try {
+    res = await fetch(CONFIG[service] + path, { method, headers: h, body: body && JSON.stringify(body) });
+  } catch {
+    throw new ApiError(0, { detail: "We couldn't reach the server. Check your connection and try again." });
+  }
+  if (action) delete store.pendingKeys[action];
+  const text = await res.text();
+  const data = text ? JSON.parse(text) : null;
+  if (!res.ok) throw new ApiError(res.status, data);
+  return { data, etag: res.headers.get("ETag") ?? (data?.version ? `"${data.version}"` : null) };
+}
+
+/** Turns API failures into messages meant for customers rather than developers. */
+function friendly(error, context) {
+  switch (error.status) {
+    case 0: return error.message;
+    case 401: return "Please sign in to continue.";
+    case 403: return "You don't have permission to do this.";
+    case 404: return context === "hold" ? "This reservation no longer exists." : "We couldn't find what you were looking for.";
+    case 409: return context === "hold"
+      ? "Sorry, some of the seats you chose were just taken. Please pick different seats."
+      : context === "order" ? "This reservation can no longer be checked out. Please choose your seats again."
+      : "Someone else changed this in the meantime. Please reload and try again.";
+    case 410: return "Ticket sales for this date are closed.";
+    case 412: return "This session was updated in the meantime. Please reload it and try again.";
+    case 422: return error.message;
+    default: return "Something went wrong on our side. Please try again in a moment.";
+  }
+}
+
+// ---- Formatting ------------------------------------------------------------------------------
+
+const esc = (v) => String(v ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
+const money = (m) => m ? new Intl.NumberFormat("en-IE", { style: "currency", currency: m.currency }).format(Number(m.amount)) : "";
+const dateTime = (iso, timeZone) => new Intl.DateTimeFormat("en-GB",
+  { dateStyle: "full", timeStyle: "short", timeZone: timeZone || undefined }).format(new Date(iso));
+const plural = (n, word) => `${n} ${word}${n === 1 ? "" : "s"}`;
+
+function notice(kind, message) { return `<div class="notice ${kind}">${esc(message)}</div>`; }
+function loading(message = "Loading…") { app.innerHTML = `<p class="muted">${esc(message)}</p>`; }
+
+// ---- Router ----------------------------------------------------------------------------------
+
+const routes = [
+  [/^#?\/?$/, () => eventsPage()],
+  [/^#\/events\/([^/]+)$/, (m) => eventPage(decodeURIComponent(m[1]))],
+  [/^#\/sessions\/([^/]+)\/seats$/, (m) => seatsPage(decodeURIComponent(m[1]))],
+  [/^#\/orders\/([^/]+)$/, (m) => orderPage(decodeURIComponent(m[1]))],
+];
+
+function route() {
+  clearTimeout(store.pollTimer);
+  const hash = location.hash || "#/";
+  for (const [pattern, page] of routes) {
+    const m = hash.match(pattern);
+    if (m) return page(m);
+  }
+  app.innerHTML = notice("error", "Page not found.");
+}
+addEventListener("hashchange", route);
+
+// ---- Customer: events and dates --------------------------------------------------------------
+
+async function eventsPage() {
+  loading();
+  try {
+    const { data } = await api("catalogue", "GET", "/events?limit=50");
+    app.innerHTML = `
+      <h1>What's on</h1>
+      <p class="muted">Pick an event to see its dates and book your seats.</p>
+      <div class="list">
+        ${data.items.length ? data.items.map(e => `
+          <div class="card item">
+            <div><h3>${esc(e.title)}</h3><p class="muted">${esc(e.description)}</p></div>
+            <a class="button" href="#/events/${encodeURIComponent(e.eventId)}">See dates</a>
+          </div>`).join("") : `<p class="muted">There are no events on sale right now.</p>`}
+      </div>`;
+  } catch (e) {
+    app.innerHTML = `<h1>What's on</h1>${notice("error", friendly(e))}`;
+  }
+}
+
+async function eventPage(eventId) {
+  loading();
+  try {
+    const [{ data: event }, { data: sessions }] = await Promise.all([
+      api("catalogue", "GET", `/events/${encodeURIComponent(eventId)}`),
+      api("catalogue", "GET", `/events/${encodeURIComponent(eventId)}/sessions?limit=50`),
+    ]);
+    const now = Date.now();
+    app.innerHTML = `
+      <p><a href="#/" class="muted">← All events</a></p>
+      <h1>${esc(event.title)}</h1>
+      <p class="muted">${esc(event.description)}</p>
+      <div class="list">
+        ${sessions.items.length ? sessions.items.map(s => {
+          const open = now >= Date.parse(s.salesOpenAt) && now < Date.parse(s.salesCloseAt);
+          const from = Math.min(...s.priceTiers.map(t => Number(t.price.amount)));
+          const label = open ? "Choose seats" : now < Date.parse(s.salesOpenAt)
+            ? `On sale ${dateTime(s.salesOpenAt, s.timeZone)}` : "Sales closed";
+          return `
+            <div class="card item">
+              <div>
+                <h3>${esc(dateTime(s.startsAt, s.timeZone))}</h3>
+                <p class="muted">From ${money({ amount: from, currency: "EUR" })}</p>
+              </div>
+              ${open ? `<a class="button" href="#/sessions/${encodeURIComponent(s.sessionId)}/seats">${label}</a>`
+                     : `<span class="muted">${esc(label)}</span>`}
+            </div>`;
+        }).join("") : `<p class="muted">No dates are on sale for this event yet.</p>`}
+      </div>`;
+  } catch (e) {
+    app.innerHTML = `<p><a href="#/" class="muted">← All events</a></p>${notice("error", friendly(e))}`;
+  }
+}
+
+// ---- Customer: seat selection and reservation ------------------------------------------------
+
+async function loadAllSeats(sessionId) {
+  const seats = [];
+  let cursor = null;
+  do {
+    const q = new URLSearchParams({ limit: "100", ...(cursor ? { cursor } : {}) });
+    const { data } = await api("inventory", "GET", `/sessions/${encodeURIComponent(sessionId)}/seats?${q}`);
+    seats.push(...data.items);
+    cursor = data.nextCursor;
+  } while (cursor);
+  return seats;
+}
+
+async function seatsPage(sessionId, flash = "") {
+  loading("Loading the seat map…");
+  let session, seats;
+  try {
+    [{ data: session }, seats] = await Promise.all([
+      api("catalogue", "GET", `/sessions/${encodeURIComponent(sessionId)}`),
+      loadAllSeats(sessionId),
+    ]);
+  } catch (e) {
+    app.innerHTML = notice("error", friendly(e));
+    return;
+  }
+
+  const selected = new Map();
+  const back = `#/events/${encodeURIComponent(session.eventId)}`;
+
+  // Sector → row → seats, in the order Inventory returns them (sector, row, number)
+  const sectors = new Map();
+  for (const seat of seats) {
+    if (!sectors.has(seat.sector)) sectors.set(seat.sector, new Map());
+    const rows = sectors.get(seat.sector);
+    if (!rows.has(seat.row)) rows.set(seat.row, []);
+    rows.get(seat.row).push(seat);
+  }
+
+  app.innerHTML = `
+    <p><a href="${back}" class="muted">← All dates</a></p>
+    <h1>Choose your seats</h1>
+    <p class="muted">${esc(dateTime(session.startsAt, session.timeZone))} · up to 10 seats per booking</p>
+    <div id="message">${flash}</div>
+    <div class="layout">
+      <div class="card">
+        <div class="stage">Stage</div>
+        ${[...sectors].map(([sector, rows]) => `
+          <div class="sector"><h4>${esc(sector)}</h4>
+            ${[...rows].map(([row, rowSeats]) => `
+              <div class="seat-row"><span class="row-label">${esc(row)}</span>
+                ${rowSeats.map(s => `<button class="seat ${s.status === "FREE" ? "" : "taken"}"
+                    data-seat="${esc(s.seatId)}" ${s.status === "FREE" ? "" : "disabled"}
+                    title="${esc(`${sector}, row ${row}, seat ${s.number} · ${money(s.price)}`)}">${esc(s.number)}</button>`).join("")}
+              </div>`).join("")}
+          </div>`).join("")}
+        <div class="legend"><span class="l-free">Available</span><span class="l-sel">Your selection</span><span class="l-taken">Unavailable</span></div>
+      </div>
+      <aside class="card summary" id="summary"></aside>
+    </div>`;
+
+  const seatById = new Map(seats.map(s => [s.seatId, s]));
+  const message = (html) => { document.getElementById("message").innerHTML = html; };
+
+  function renderSelection() {
+    const items = [...selected.values()];
+    const total = items.reduce((sum, s) => sum + Number(s.price.amount), 0);
+    document.getElementById("summary").innerHTML = `
+      <h2>Your selection</h2>
+      ${items.length ? `
+        <ul class="lines">${items.map(s => `<li><span>${esc(seatLabel(s))}</span><span>${money(s.price)}</span></li>`).join("")}</ul>
+        <div class="total"><span>Total</span><span>${money({ amount: total, currency: "EUR" })}</span></div>`
+        : `<p class="muted">Select seats on the map.</p>`}
+      <button id="checkout" ${items.length && items.length <= 10 ? "" : "disabled"}>Continue to payment</button>
+      ${items.length > 10 ? `<p class="muted">You can book up to 10 seats at a time.</p>` : ""}`;
+    document.getElementById("checkout").onclick = checkout;
+  }
+
+  /**
+   * One click for the customer, two steps for Inventory & Orders: reserve the seats (hold), then turn the
+   * hold into an order. The purchase countdown starts with the reservation and lasts until payment.
+   */
+  async function checkout(event) {
+    const button = event.target;
+    button.disabled = true;
+    button.textContent = "Reserving your seats…";
+    message("");
+    const seatIds = [...selected.keys()].sort();
+
+    let hold;
+    try {
+      ({ data: hold } = await api("inventory", "POST", `/sessions/${encodeURIComponent(sessionId)}/holds`,
+        { body: { seatIds }, action: `hold:${sessionId}:${seatIds}` }));
+    } catch (e) {
+      if (e.status === 409) return seatsPage(sessionId, notice("error", friendly(e, "hold")));
+      message(notice("error", friendly(e, "hold")));
+      return renderSelection();
+    }
+
+    try {
+      const { data } = await api("inventory", "POST", "/orders",
+        { body: { holdId: hold.holdId }, action: `order:${hold.holdId}` });
+      rememberOrder(data.orderId, {
+        deadline: hold.expiresAt,
+        seats: hold.items.map(i => seatLabel(seatById.get(i.seatId), i.seatId)),
+      });
+      location.hash = `#/orders/${encodeURIComponent(data.orderId)}`;
+    } catch (e) {
+      // Do not leave the seats blocked by a reservation the customer cannot use
+      api("inventory", "DELETE", `/holds/${encodeURIComponent(hold.holdId)}`).catch(() => {});
+      message(notice("error", friendly(e, "order")));
+      renderSelection();
+    }
+  }
+
+  app.querySelectorAll(".seat:not([disabled])").forEach(button => {
+    button.onclick = () => {
+      const seat = seatById.get(button.dataset.seat);
+      selected.has(seat.seatId) ? selected.delete(seat.seatId) : selected.set(seat.seatId, seat);
+      button.classList.toggle("selected");
+      renderSelection();
+    };
+  });
+
+  renderSelection();
+}
+
+// ---- Customer: order -------------------------------------------------------------------------
+
+/**
+ * Renders the order card once; while the payment is pending only the title, the countdown and the payment
+ * area are updated, so the page does not flicker while it follows the order.
+ */
+async function orderPage(orderId) {
+  loading("Loading your order…");
+  let order;
+  try {
+    ({ data: order } = await api("inventory", "GET", `/orders/${encodeURIComponent(orderId)}`));
+  } catch (e) {
+    app.innerHTML = notice("error", friendly(e));
+    return;
+  }
+
+  const saved = recalledOrder(orderId);
+  app.innerHTML = `
+    <h1 id="orderTitle"></h1>
+    <p class="muted">Order ${esc(order.orderId)}</p>
+    <div class="card" style="max-width:480px;margin-top:16px">
+      <p class="muted" id="countdown" hidden>Time left to complete your purchase: <span class="timer" id="timer"></span></p>
+      <ul class="lines">${order.items.map((i, n) => `<li><span>${esc(saved?.seats?.[n] ?? `Seat ${i.seatId}`)}</span><span>${money(i.unitPrice)}</span></li>`).join("")}</ul>
+      <div class="total"><span>Total</span><span>${money(order.total)}</span></div>
+      <div id="payment"></div>
+    </div>`;
+
+  let expired = false;
+  let wantsToPay = false;
+  if (order.state === "PENDING_PAYMENT" && saved?.deadline) {
+    document.getElementById("countdown").hidden = false;
+    startCountdown(saved.deadline, document.getElementById("timer"), () => {
+      expired = true;
+      update(order);
+    });
+  }
+
+  function update(current) {
+    order = current;
+    const pending = order.state === "PENDING_PAYMENT";
+    document.getElementById("orderTitle").textContent =
+      order.state === "PAID" ? "Thank you for your purchase" : pending ? "Complete your payment" : "Your order";
+    if (!pending) {
+      stopCountdown();
+      document.getElementById("countdown").hidden = true;
+    }
+    const payment = document.getElementById("payment");
+    const html = !pending ? `<p class="status">${esc(ORDER_STATES[order.state] ?? order.state)}</p>`
+      : expired ? `<p class="status">Time's up: the reservation has expired.</p>`
+      : `<button id="pay">Pay ${money(order.total)}</button>`;
+    // Rewrite the payment area only when its content actually changes
+    if (payment.dataset.html !== html) {
+      payment.innerHTML = html;
+      payment.dataset.html = html;
+      const pay = document.getElementById("pay");
+      if (pay) pay.onclick = goToPayment;
+    }
+    // The customer already asked to pay: leave as soon as the payment page is ready
+    if (wantsToPay && pending && !expired && order.checkoutUrl) location.href = order.checkoutUrl;
+  }
+
+  /**
+   * Payments prepares the checkout page asynchronously. If it is not ready yet when the customer clicks,
+   * the button shows the wait and the redirect happens as soon as the link arrives.
+   */
+  function goToPayment(event) {
+    if (order.checkoutUrl) {
+      location.href = order.checkoutUrl;
+      return;
+    }
+    wantsToPay = true;
+    event.target.disabled = true;
+    event.target.textContent = "Preparing payment…";
+  }
+  update(order);
+
+  // Payment is started asynchronously: follow the order quietly while it waits for payment
+  async function poll() {
+    if (!document.getElementById("payment") || order.state !== "PENDING_PAYMENT" || expired) return;
+    try {
+      ({ data: order } = await api("inventory", "GET", `/orders/${encodeURIComponent(orderId)}`));
+      update(order);
+    } catch { /* keep the last known state and try again */ }
+    store.pollTimer = setTimeout(poll, 2000);
+  }
+  store.pollTimer = setTimeout(poll, 2000);
+}
+
+// ---- Countdown and remembered orders ---------------------------------------------------------
+
+function formatRemaining(seconds) { return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")}`; }
+
+/** Updates the text of [element] every second until [deadline]; then calls [onExpire] once. */
+function startCountdown(deadline, element, onExpire) {
+  stopCountdown();
+  const tick = () => {
+    // The customer left the page: stop counting; the countdown resumes if they come back
+    if (!element.isConnected) return stopCountdown();
+    const remaining = Math.max(0, Math.round((Date.parse(deadline) - Date.now()) / 1000));
+    element.textContent = formatRemaining(remaining);
+    if (remaining === 0) {
+      stopCountdown();
+      onExpire();
+    }
+  };
+  tick();
+  store.holdTimer = setInterval(tick, 1000);
+}
+
+function stopCountdown() { clearInterval(store.holdTimer); }
+
+function seatLabel(seat, fallbackId) {
+  return seat ? `${seat.sector}, row ${seat.row}, seat ${seat.number}` : `Seat ${fallbackId}`;
+}
+
+/** Keeps, per order, the purchase deadline and the seat labels, which the order resource does not carry. */
+function rememberOrder(orderId, details) {
+  try { sessionStorage.setItem(`order:${orderId}`, JSON.stringify(details)); } catch { /* optional */ }
+}
+
+function recalledOrder(orderId) {
+  try { return JSON.parse(sessionStorage.getItem(`order:${orderId}`)); } catch { return null; }
+}
+
+const ORDER_STATES = {
+  PAID: "Payment received. Enjoy the show!",
+  PAYMENT_FAILED: "The payment didn't go through, so the seats have been released.",
+  CANCELLATION_PENDING: "Your cancellation is being processed.",
+  CANCELLED: "This order has been cancelled.",
+  REFUND_PENDING: "Your refund is being processed.",
+  REFUNDED: "This order has been refunded.",
+  REFUND_FAILED: "We couldn't complete your refund. Our team will contact you.",
+};
+
+route();
+</script>
+</body>
+</html>
